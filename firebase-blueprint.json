@@ -1,0 +1,68 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User account information and settings.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Unique user ID from Firebase Auth." },
+        "email": { "type": "string", "description": "User email address." },
+        "displayName": { "type": "string", "description": "User display name." },
+        "photoURL": { "type": "string", "description": "User profile picture URL." },
+        "settings": {
+          "type": "object",
+          "properties": {
+            "darkMode": { "type": "boolean", "description": "Whether dark mode is enabled." },
+            "lockEnabled": { "type": "boolean", "description": "Whether the app lock is enabled." },
+            "lockPassword": { "type": "string", "description": "Hashed or simple password for the app lock." }
+          }
+        },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Note": {
+      "title": "Note",
+      "description": "A single note entry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "ownerId": { "type": "string", "description": "UID of the owner." },
+        "collaborators": { "type": "array", "items": { "type": "string" }, "description": "List of collaborator UIDs." },
+        "title": { "type": "string" },
+        "content": { "type": "string", "description": "Rich text content (Markdown)." },
+        "category": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "isPinned": { "type": "boolean" },
+        "isPrivate": { "type": "boolean", "description": "If true, note is in the hidden vault." },
+        "isPublic": { "type": "boolean", "description": "If true, anyone with the link can read." },
+        "type": { "type": "string", "enum": ["text", "todo", "voice"] },
+        "checklist": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "text": { "type": "string" },
+              "completed": { "type": "boolean" }
+            }
+          }
+        },
+        "voiceUrl": { "type": "string", "description": "URL to the voice recording (if applicable)." },
+        "reminderAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "title", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile data."
+    },
+    "/notes/{noteId}": {
+      "schema": "Note",
+      "description": "Individual notes."
+    }
+  }
+}

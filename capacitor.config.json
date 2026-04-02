@@ -1,0 +1,6 @@
+{
+  "appId": "com.smartnote.app",
+  "appName": "SmartNote",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}
