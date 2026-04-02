@@ -2,45 +2,6 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
-    // ===============================================================
-    // Assumed Data Model
-    // ===============================================================
-    //
-    // Collection: users
-    // Document ID: {userId} (Firebase Auth UID)
-    // Fields:
-    //   - uid: string (required)
-    //   - email: string (required)
-    //   - displayName: string (optional)
-    //   - photoURL: string (optional)
-    //   - settings: map (optional)
-    //     - darkMode: bool
-    //     - lockEnabled: bool
-    //     - lockPassword: string
-    //   - status: string (enum: 'active', 'banned')
-    //   - createdAt: timestamp
-    //
-    // Collection: notes
-    // Document ID: {noteId} (Auto-generated)
-    // Fields:
-    //   - ownerId: string (required)
-    //   - collaborators: list of strings (optional)
-    //   - title: string (required)
-    //   - content: string (optional)
-    //   - category: string (optional)
-    //   - tags: list of strings (optional)
-    //   - isPinned: bool (optional)
-    //   - isPrivate: bool (optional)
-    //   - isPublic: bool (optional)
-    //   - type: string (enum: 'text', 'todo', 'voice')
-    //   - checklist: list of maps (optional)
-    //   - voiceUrl: string (optional)
-    //   - reminderAt: timestamp (optional)
-    //   - createdAt: timestamp (required)
-    //   - updatedAt: timestamp (required)
-    //
-    // ===============================================================
-
     // Helper Functions
     function isAuthenticated() {
       return request.auth != null;
@@ -54,54 +15,32 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == resource.data.ownerId;
     }
 
-    function isAdmin() {
-      return isAuthenticated() &&
-        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
-          (request.auth.token.email == "dishandishan563@gmail.com" && request.auth.token.email_verified == true));
-    }
-
-    function isValidEmail(email) {
-      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
-    }
-
-    function hasOnlyAllowedFields(allowedFields) {
-      return request.resource.data.keys().hasOnly(allowedFields);
-    }
-
-    // Domain Validators
     function isValidUser(data) {
-      return data.uid is string && data.uid.size() < 128 &&
-             data.email is string && isValidEmail(data.email) && data.email.size() < 256 &&
-             (!('displayName' in data) || (data.displayName is string && data.displayName.size() < 100)) &&
-             (!('status' in data) || data.status in ['active', 'banned']);
+      return data.keys().hasAll(['uid', 'email']) &&
+             data.uid is string &&
+             data.email is string;
     }
 
     function isValidNote(data) {
-      return data.ownerId is string && data.ownerId.size() < 128 &&
-             data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
-             (!('content' in data) || (data.content is string && data.content.size() < 50000)) &&
-             (!('category' in data) || (data.category is string && data.category.size() < 50)) &&
-             (!('type' in data) || data.type in ['text', 'todo', 'voice']) &&
-             (!('collaborators' in data) || (data.collaborators is list && data.collaborators.size() < 20));
+      return data.keys().hasAll(['ownerId', 'title', 'createdAt', 'updatedAt']) &&
+             data.ownerId == request.auth.uid &&
+             data.title is string && data.title.size() <= 200 &&
+             (data.content == null || (data.content is string && data.content.size() <= 50000));
     }
 
     // User Profiles
     match /users/{userId} {
-      allow read: if isOwner(userId) || isAdmin();
-      allow create: if isOwner(userId) && isValidUser(request.resource.data) && 
-                      (!('role' in request.resource.data) || request.resource.data.role == 'user' || isAdmin());
-      allow update: if (isOwner(userId) || isAdmin()) && isValidUser(request.resource.data) &&
-                      (request.resource.data.role == resource.data.role || isAdmin());
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isOwner(userId) && isValidUser(request.resource.data);
     }
 
     // Notes
     match /notes/{noteId} {
-      allow read: if (isAuthenticated() && (resource.data.ownerId == request.auth.uid || request.auth.uid in resource.data.collaborators)) || 
-                     (resource.data.isPublic == true) || isAdmin();
-      allow create: if isAuthenticated() && isValidNote(request.resource.data) && request.resource.data.ownerId == request.auth.uid;
-      allow update: if isAuthenticated() && (isDocOwner() || request.auth.uid in resource.data.collaborators || isAdmin()) && 
-                      isValidNote(request.resource.data) && request.resource.data.ownerId == resource.data.ownerId;
-      allow delete: if isAuthenticated() && (isDocOwner() || isAdmin());
+      allow read: if (isAuthenticated() && (resource.data.ownerId == request.auth.uid || request.auth.uid in resource.data.collaborators)) || (resource.data.isPublic == true);
+      allow create: if isAuthenticated() && isValidNote(request.resource.data);
+      allow update: if isAuthenticated() && (isDocOwner() || request.auth.uid in resource.data.collaborators) && isValidNote(request.resource.data);
+      allow delete: if isAuthenticated() && isDocOwner();
     }
   }
 }

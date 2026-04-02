@@ -1,7 +1,5 @@
 {
-  "name": "Remix: SmartNotes",
+  "name": "SmartNotes",
   "description": "A modern, clean note-taking app with rich text, categories, pinning, and cloud sync.",
-  "requestFramePermissions": [
-    "microphone"
-  ]
+  "requestFramePermissions": ["microphone"]
 }

@@ -15,10 +15,8 @@ import { GoogleGenAI } from "@google/genai";
 import { 
   auth, db, signIn, logout, 
   collection, doc, setDoc, updateDoc, deleteDoc, getDoc,
-  onSnapshot, query, where, orderBy, serverTimestamp, Timestamp, getDocs,
-  OperationType, handleFirestoreError
+  onSnapshot, query, where, orderBy, serverTimestamp, Timestamp, getDocs 
 } from './firebase';
-import { getDocFromServer } from 'firebase/firestore';
 import { Note, NoteType, ChecklistItem, UserProfile } from './types';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -26,53 +24,62 @@ import { twMerge } from 'tailwind-merge';
 // --- Utilities ---
 const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+    tenantId: string | null | undefined;
+    providerInfo: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
 // --- Components ---
-
-class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean, error: any }> {
-  constructor(props: { children: React.ReactNode }) {
-    super(props);
-    this.state = { hasError: false, error: null };
-  }
-
-  static getDerivedStateFromError(error: any) {
-    return { hasError: true, error };
-  }
-
-  componentDidCatch(error: any, errorInfo: any) {
-    console.error("ErrorBoundary caught an error", error, errorInfo);
-  }
-
-  render() {
-    if (this.state.hasError) {
-      let message = "Something went wrong.";
-      try {
-        const errObj = JSON.parse(this.state.error.message);
-        if (errObj.error) message = `Firestore Error: ${errObj.error} (${errObj.operationType} on ${errObj.path})`;
-      } catch (e) {
-        message = this.state.error.message || message;
-      }
-
-      return (
-        <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 p-4">
-          <div className="bg-white dark:bg-gray-800 p-8 rounded-2xl shadow-xl max-w-md w-full text-center">
-            <Shield className="w-16 h-16 text-red-500 mx-auto mb-4" />
-            <h1 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">Application Error</h1>
-            <p className="text-gray-600 dark:text-gray-400 mb-6">{message}</p>
-            <Button onClick={() => window.location.reload()} variant="primary" className="w-full">
-              Reload Application
-            </Button>
-          </div>
-        </div>
-      );
-    }
-
-    return this.props.children;
-  }
-}
 
 const Button = ({ 
   children, className, variant = 'primary', size = 'md', ...props 
@@ -119,16 +126,49 @@ const Card = ({ children, className, onClick, onContextMenu }: { children: React
   </motion.div>
 );
 
+const Toast = ({ message, type, onClose }: { message: string, type: 'info' | 'error' | 'success', onClose: () => void }) => (
+  <motion.div 
+    initial={{ opacity: 0, y: 50 }}
+    animate={{ opacity: 1, y: 0 }}
+    exit={{ opacity: 0, y: 50 }}
+    className={cn(
+      "fixed bottom-24 left-1/2 -translate-x-1/2 z-[100] px-6 py-3 rounded-2xl shadow-2xl flex items-center gap-3 text-white font-medium min-w-[200px] justify-center",
+      type === 'success' ? "bg-green-600" : type === 'error' ? "bg-red-600" : "bg-indigo-600"
+    )}
+  >
+    {message}
+  </motion.div>
+);
+
+const ConfirmDialog = ({ message, onConfirm, onCancel }: { message: string, onConfirm: () => void, onCancel: () => void }) => (
+  <motion.div 
+    initial={{ opacity: 0 }}
+    animate={{ opacity: 1 }}
+    exit={{ opacity: 0 }}
+    className="fixed inset-0 z-[110] bg-black/50 backdrop-blur-sm flex items-center justify-center p-6"
+  >
+    <motion.div 
+      initial={{ scale: 0.9, opacity: 0 }}
+      animate={{ scale: 1, opacity: 1 }}
+      className="bg-white dark:bg-gray-950 p-6 rounded-3xl shadow-2xl max-w-xs w-full text-center"
+    >
+      <h3 className="text-xl font-bold mb-4 dark:text-white">{message}</h3>
+      <div className="flex gap-3">
+        <Button variant="ghost" className="flex-1" onClick={onCancel}>Cancel</Button>
+        <Button variant="danger" className="flex-1" onClick={() => { onConfirm(); onCancel(); }}>Confirm</Button>
+      </div>
+    </motion.div>
+  </motion.div>
+);
+
 // --- Main App ---
 
 export default function App() {
   return (
-    <ErrorBoundary>
-      <Routes>
-        <Route path="/" element={<MainApp />} />
-        <Route path="/note/:noteId" element={<PublicNoteView />} />
-      </Routes>
-    </ErrorBoundary>
+    <Routes>
+      <Route path="/" element={<MainApp />} />
+      <Route path="/note/:noteId" element={<PublicNoteView />} />
+    </Routes>
   );
 }
 
@@ -144,6 +184,13 @@ function MainApp() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [isLocked, setIsLocked] = useState(false);
   const [isVaultLocked, setIsVaultLocked] = useState(true);
+  const [toast, setToast] = useState<{ message: string, type: 'info' | 'error' | 'success' } | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{ message: string, onConfirm: () => void } | null>(null);
+
+  const showToast = (message: string, type: 'info' | 'error' | 'success' = 'info') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  };
   const [lockInput, setLockInput] = useState('');
   const [vaultInput, setVaultInput] = useState('');
   const [darkMode, setDarkMode] = useState(false);
@@ -188,17 +235,6 @@ function MainApp() {
 
   // --- Profile & Notes ---
   useEffect(() => {
-    async function testConnection() {
-      try {
-        await getDocFromServer(doc(db, 'test', 'connection'));
-      } catch (error) {
-        if(error instanceof Error && error.message.includes('the client is offline')) {
-          console.error("Please check your Firebase configuration. ");
-        }
-      }
-    }
-    testConnection();
-
     if (!user) {
       setProfile(null);
       setNotes([]);
@@ -210,7 +246,7 @@ function MainApp() {
       if (snap.exists()) {
         const data = snap.data() as UserProfile;
         if (data.status === 'banned') {
-          alert('Your account has been suspended by the administrator.');
+          showToast('Your account has been suspended by the administrator.', 'error');
           logout();
           return;
         }
@@ -229,15 +265,9 @@ function MainApp() {
           status: 'active',
           createdAt: serverTimestamp()
         };
-        try {
-          setDoc(userDoc, newProfile);
-        } catch (err) {
-          handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`);
-        }
+        setDoc(userDoc, newProfile);
         setShowOnboarding(true);
       }
-    }, (err) => {
-      handleFirestoreError(err, OperationType.GET, `users/${user.uid}`);
     });
 
     const qOwned = query(collection(db, 'notes'), where('ownerId', '==', user.uid));
@@ -249,8 +279,6 @@ function MainApp() {
         const other = prev.filter(n => n.ownerId !== user.uid);
         return [...owned, ...other];
       });
-    }, (err) => {
-      handleFirestoreError(err, OperationType.LIST, 'notes (owned)');
     });
 
     const unsubCollab = onSnapshot(qCollab, (snap) => {
@@ -259,8 +287,6 @@ function MainApp() {
         const other = prev.filter(n => !n.collaborators?.includes(user.uid));
         return [...collab, ...other];
       });
-    }, (err) => {
-      handleFirestoreError(err, OperationType.LIST, 'notes (collab)');
     });
 
     return () => {
@@ -293,11 +319,7 @@ function MainApp() {
     if (!user) return;
     const newMode = !darkMode;
     setDarkMode(newMode);
-    try {
-      await updateDoc(doc(db, 'users', user.uid), { 'settings.darkMode': newMode });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}`);
-    }
+    await updateDoc(doc(db, 'users', user.uid), { 'settings.darkMode': newMode });
   };
 
   const handleProfilePicUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -306,11 +328,7 @@ function MainApp() {
       const reader = new FileReader();
       reader.onloadend = async () => {
         const base64 = reader.result as string;
-        try {
-          await updateDoc(doc(db, 'users', user.uid), { photoURL: base64 });
-        } catch (err) {
-          handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}`);
-        }
+        await updateDoc(doc(db, 'users', user.uid), { photoURL: base64 });
       };
       reader.readAsDataURL(file);
     }
@@ -323,64 +341,68 @@ function MainApp() {
   };
 
   const deleteSelectedNotes = async () => {
-    if (confirm(`Delete ${selectedNoteIds.length} notes?`)) {
-      for (const id of selectedNoteIds) {
+    setConfirmDialog({
+      message: `Delete ${selectedNoteIds.length} notes?`,
+      onConfirm: async () => {
         try {
-          await deleteDoc(doc(db, 'notes', id));
-        } catch (err) {
-          handleFirestoreError(err, OperationType.DELETE, `notes/${id}`);
+          for (const id of selectedNoteIds) {
+            await deleteDoc(doc(db, 'notes', id));
+          }
+          setSelectedNoteIds([]);
+          setIsSelectMode(false);
+          showToast('Notes deleted', 'success');
+        } catch (error) {
+          handleFirestoreError(error, OperationType.DELETE, 'notes');
         }
       }
-      setSelectedNoteIds([]);
-      setIsSelectMode(false);
-    }
+    });
   };
 
   // --- Note Actions ---
   const handleAddNote = async (type: NoteType = 'text') => {
     if (!user) return;
-    const newNote: Partial<Note> = {
-      ownerId: user.uid,
-      collaborators: [],
-      title: '',
-      content: '',
-      category: 'General',
-      tags: [],
-      isPinned: false,
-      isPrivate: showVault,
-      isPublic: false,
-      type,
-      checklist: type === 'todo' ? [] : undefined,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    };
-    const noteRef = doc(collection(db, 'notes'));
     try {
+      const newNote: Partial<Note> = {
+        ownerId: user.uid,
+        collaborators: [],
+        title: '',
+        content: '',
+        category: 'General',
+        tags: [],
+        isPinned: false,
+        isPrivate: showVault,
+        isPublic: false,
+        type,
+        checklist: type === 'todo' ? [] : undefined,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      };
+      const noteRef = doc(collection(db, 'notes'));
       await setDoc(noteRef, newNote);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, 'notes');
+      setIsEditing({ id: noteRef.id, ...newNote } as Note);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'notes');
     }
-    setIsEditing({ id: noteRef.id, ...newNote } as Note);
   };
 
   const handleDeleteNote = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (confirm('Delete this note?')) {
-      try {
-        await deleteDoc(doc(db, 'notes', id));
-      } catch (err) {
-        handleFirestoreError(err, OperationType.DELETE, `notes/${id}`);
+    setConfirmDialog({
+      message: 'Delete this note?',
+      onConfirm: async () => {
+        try {
+          await deleteDoc(doc(db, 'notes', id));
+          showToast('Note deleted', 'success');
+        } catch (error) {
+          handleFirestoreError(error, OperationType.DELETE, `notes/${id}`);
+        }
       }
-    }
+    });
   };
 
   const togglePin = async (note: Note, e: React.MouseEvent) => {
     e.stopPropagation();
-    try {
-      await updateDoc(doc(db, 'notes', note.id), { isPinned: !note.isPinned, updatedAt: serverTimestamp() });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `notes/${note.id}`);
-    }
+    await updateDoc(doc(db, 'notes', note.id), { isPinned: !note.isPinned, updatedAt: serverTimestamp() });
   };
 
   // --- Filtering ---
@@ -437,7 +459,7 @@ function MainApp() {
           if (lockInput === profile?.settings.lockPassword || !profile?.settings.lockPassword) {
             setIsLocked(false);
           } else {
-            alert('Wrong password');
+            showToast('Wrong password', 'error');
           }
         }} className="w-full max-w-xs">Unlock</Button>
       </div>
@@ -520,7 +542,7 @@ function MainApp() {
             if (vaultInput === profile?.settings.lockPassword) {
               setIsVaultLocked(false);
             } else {
-              alert('Incorrect Password');
+              showToast('Incorrect Password', 'error');
             }
           }}>Unlock Vault</Button>
         </div>
@@ -704,11 +726,7 @@ function MainApp() {
                           updatedAt: serverTimestamp()
                         };
                         const noteRef = doc(collection(db, 'notes'));
-                        try {
-                          await setDoc(noteRef, newNote);
-                        } catch (err) {
-                          handleFirestoreError(err, OperationType.CREATE, 'notes');
-                        }
+                        await setDoc(noteRef, newNote);
                         setIsEditing({ id: noteRef.id, ...newNote } as Note);
                       };
                       reader.readAsDataURL(file);
@@ -764,11 +782,12 @@ function MainApp() {
           <NoteEditor 
             note={isEditing} 
             onClose={() => setIsEditing(null)} 
+            showToast={showToast}
             onSave={async (updated) => {
               try {
                 await updateDoc(doc(db, 'notes', isEditing.id), { ...updated, updatedAt: serverTimestamp() });
-              } catch (err) {
-                handleFirestoreError(err, OperationType.UPDATE, `notes/${isEditing.id}`);
+              } catch (error) {
+                handleFirestoreError(error, OperationType.UPDATE, `notes/${isEditing.id}`);
               }
             }}
           />
@@ -833,6 +852,12 @@ function MainApp() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Feedback UI */}
+      <AnimatePresence>
+        {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+        {confirmDialog && <ConfirmDialog message={confirmDialog.message} onConfirm={confirmDialog.onConfirm} onCancel={() => setConfirmDialog(null)} />}
+      </AnimatePresence>
     </div>
   );
 }
@@ -854,7 +879,7 @@ function PublicNoteView() {
           }
         }
       } catch (err) {
-        handleFirestoreError(err, OperationType.GET, `notes/${noteId}`);
+        console.error(err);
       } finally {
         setLoading(false);
       }
@@ -928,7 +953,7 @@ function PublicNoteView() {
 
 // --- Sub-Components ---
 
-function NoteEditor({ note, onClose, onSave }: { note: Note, onClose: () => void, onSave: (n: Partial<Note>) => void }) {
+function NoteEditor({ note, onClose, onSave, showToast }: { note: Note, onClose: () => void, onSave: (n: Partial<Note>) => void, showToast: (m: string, t?: 'info' | 'error' | 'success') => void }) {
   const [title, setTitle] = useState(note.title);
   const [content, setContent] = useState(note.content);
   const [category, setCategory] = useState(note.category);
@@ -976,7 +1001,7 @@ function NoteEditor({ note, onClose, onSave }: { note: Note, onClose: () => void
       setContent(prev => prev + "\n\n--- AI Assistant ---\n" + (result.text || ''));
     } catch (err) {
       console.error(err);
-      alert("AI processing failed. Check your API key.");
+      showToast("AI processing failed. Check your API key.", "error");
     } finally {
       setIsAIProcessing(false);
     }
@@ -1010,7 +1035,7 @@ function NoteEditor({ note, onClose, onSave }: { note: Note, onClose: () => void
         reader.readAsDataURL(file);
       } catch (err) {
         console.error(err);
-        alert("Scanning failed.");
+        showToast("Scanning failed.", "error");
       } finally {
         setIsAIProcessing(false);
       }
@@ -1056,7 +1081,7 @@ function NoteEditor({ note, onClose, onSave }: { note: Note, onClose: () => void
       setIsRecording(true);
     } catch (err) {
       console.error(err);
-      alert('Microphone access denied');
+      showToast('Microphone access denied', 'error');
     }
   };
 
@@ -1187,7 +1212,7 @@ function NoteEditor({ note, onClose, onSave }: { note: Note, onClose: () => void
         {isPublic && (
           <div className="p-3 bg-blue-50 dark:bg-blue-900/10 rounded-xl flex items-center justify-between gap-4">
             <p className="text-xs text-blue-600 truncate flex-1">{shareLink}</p>
-            <Button size="sm" variant="ghost" onClick={() => { navigator.clipboard.writeText(shareLink); alert('Link copied!'); }}>Copy</Button>
+            <Button size="sm" variant="ghost" onClick={() => { navigator.clipboard.writeText(shareLink); showToast('Link copied!', 'success'); }}>Copy</Button>
           </div>
         )}
 
@@ -1383,7 +1408,7 @@ function AdminVault({ onClose }: { onClose: () => void }) {
           const snap = await getDocs(q);
           setUsers(snap.docs.map(d => d.data() as UserProfile));
         } catch (err) {
-          handleFirestoreError(err, OperationType.LIST, 'users');
+          console.error(err);
         } finally {
           setLoading(false);
         }
@@ -1393,12 +1418,12 @@ function AdminVault({ onClose }: { onClose: () => void }) {
   }, [isUnlocked]);
 
   const toggleUserStatus = async (uid: string, currentStatus: string) => {
-    const newStatus = currentStatus === 'active' ? 'banned' : 'active';
     try {
+      const newStatus = currentStatus === 'active' ? 'banned' : 'active';
       await updateDoc(doc(db, 'users', uid), { status: newStatus });
       setUsers(prev => prev.map(u => u.uid === uid ? { ...u, status: newStatus as any } : u));
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `users/${uid}`);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `users/${uid}`);
     }
   };
 
@@ -1487,10 +1512,10 @@ function SettingsModal({ profile, onClose, onLogout, onOpenAdmin }: { profile: U
         'settings.lockEnabled': lockEnabled,
         'settings.lockPassword': password
       });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `users/${profile.uid}`);
+      onClose();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `users/${profile.uid}`);
     }
-    onClose();
   };
 
   return (
