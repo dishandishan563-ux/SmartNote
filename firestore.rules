@@ -7,6 +7,14 @@ service cloud.firestore {
       return request.auth != null;
     }
     
+    function isAdmin() {
+      return isAuthenticated() && (
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') ||
+        request.auth.token.email == "dishandishan563@gmail.com"
+      );
+    }
+    
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
     }
@@ -23,24 +31,24 @@ service cloud.firestore {
 
     function isValidNote(data) {
       return data.keys().hasAll(['ownerId', 'title', 'createdAt', 'updatedAt']) &&
-             data.ownerId == request.auth.uid &&
              data.title is string && data.title.size() <= 200 &&
              (data.content == null || (data.content is string && data.content.size() <= 50000));
     }
 
     // User Profiles
     match /users/{userId} {
-      allow read: if isOwner(userId);
+      allow read: if isAuthenticated();
       allow create: if isOwner(userId) && isValidUser(request.resource.data);
-      allow update: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if (isOwner(userId) || isAdmin()) && isValidUser(request.resource.data);
+      allow delete: if isAdmin();
     }
 
     // Notes
     match /notes/{noteId} {
-      allow read: if (isAuthenticated() && (resource.data.ownerId == request.auth.uid || request.auth.uid in resource.data.collaborators)) || (resource.data.isPublic == true);
-      allow create: if isAuthenticated() && isValidNote(request.resource.data);
-      allow update: if isAuthenticated() && (isDocOwner() || request.auth.uid in resource.data.collaborators) && isValidNote(request.resource.data);
-      allow delete: if isAuthenticated() && isDocOwner();
+      allow read: if (isAuthenticated() && (resource.data.ownerId == request.auth.uid || request.auth.uid in resource.data.collaborators || isAdmin())) || (resource.data.isPublic == true);
+      allow create: if isAuthenticated() && isValidNote(request.resource.data) && request.resource.data.ownerId == request.auth.uid;
+      allow update: if isAuthenticated() && (isDocOwner() || request.auth.uid in resource.data.collaborators || isAdmin()) && isValidNote(request.resource.data) && request.resource.data.ownerId == resource.data.ownerId;
+      allow delete: if isAuthenticated() && (isDocOwner() || isAdmin());
     }
   }
 }

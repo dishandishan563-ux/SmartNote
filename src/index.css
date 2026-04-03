@@ -5,8 +5,10 @@
 }
 
 @layer base {
-  body {
-    @apply bg-gray-50 dark:bg-gray-950 transition-colors duration-300;
+  html, body {
+    @apply bg-gray-50 dark:bg-gray-950 transition-colors duration-300 overflow-x-hidden;
+    width: 100%;
+    position: relative;
   }
 }
 

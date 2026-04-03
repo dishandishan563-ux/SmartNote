@@ -22,6 +22,8 @@ export interface Note {
   checklist?: ChecklistItem[];
   voiceUrl?: string;
   reminderAt?: string;
+  reminderNotified?: boolean;
+  notePassword?: string;
   createdAt: any;
   updatedAt: any;
 }
@@ -37,5 +39,6 @@ export interface UserProfile {
     lockPassword?: string;
   };
   status: 'active' | 'banned';
+  role: 'admin' | 'user';
   createdAt: any;
 }
