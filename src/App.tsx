@@ -4,114 +4,79 @@ import {
   LogOut, Moon, Sun, Lock, Unlock, Mic, Square, 
   CheckSquare, Square as SquareIcon, ChevronLeft, 
   MoreVertical, Tag, Calendar, Bell, FileText, 
-  Download, Share2, Filter, X, Check, MessageSquare, Camera, Mail,
-  Bold, Italic, Strikethrough, Code, Quote, Shield, RefreshCw, Volume2,
-  LayoutGrid, List, LayoutList
+  Download, Share2, Filter, X, Check, MessageSquare, Camera,
+  Bold, Italic, Strikethrough, Code, Quote, Shield
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
 import Markdown from 'react-markdown';
 import { Routes, Route, useParams, useNavigate } from 'react-router-dom';
-import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import { 
-  auth, db, signIn, logout, 
+  auth, db, storage, signIn, logout, 
   collection, doc, setDoc, updateDoc, deleteDoc, getDoc,
-  onSnapshot, query, where, orderBy, serverTimestamp, Timestamp, getDocs 
+  onSnapshot, query, where, orderBy, serverTimestamp, Timestamp, getDocs,
+  OperationType, handleFirestoreError,
+  ref, uploadBytes, getDownloadURL, deleteObject
 } from './firebase';
+import { Camera as CapacitorCamera, CameraResultType, CameraSource } from '@capacitor/camera';
+import { Filesystem, Directory } from '@capacitor/filesystem';
+import { Preferences } from '@capacitor/preferences';
+import { getDocFromServer } from 'firebase/firestore';
 import { Note, NoteType, ChecklistItem, UserProfile } from './types';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
 // --- Utilities ---
-const apiKey = import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-const genAI = new GoogleGenAI({ apiKey: apiKey! });
-
-enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
-
-interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId: string | undefined;
-    email: string | null | undefined;
-    emailVerified: boolean | undefined;
-    isAnonymous: boolean | undefined;
-    tenantId: string | null | undefined;
-    providerInfo: {
-      providerId: string;
-      displayName: string | null;
-      email: string | null;
-      photoUrl: string | null;
-    }[];
-  }
-}
-
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData.map(provider => ({
-        providerId: provider.providerId,
-        displayName: provider.displayName,
-        email: provider.email,
-        photoUrl: provider.photoURL
-      })) || []
-    },
-    operationType,
-    path
-  }
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
-}
+const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-const resizeImage = (base64Str: string, maxWidth = 400, maxHeight = 400): Promise<string> => {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.src = base64Str;
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      let width = img.width;
-      let height = img.height;
+// --- Components ---
 
-      if (width > height) {
-        if (width > maxWidth) {
-          height *= maxWidth / width;
-          width = maxWidth;
-        }
-      } else {
-        if (height > maxHeight) {
-          width *= maxHeight / height;
-          height = maxHeight;
-        }
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean, error: any }> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: any, errorInfo: any) {
+    console.error("ErrorBoundary caught an error", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      let message = "Something went wrong.";
+      try {
+        const errObj = JSON.parse(this.state.error.message);
+        if (errObj.error) message = `Firestore Error: ${errObj.error} (${errObj.operationType} on ${errObj.path})`;
+      } catch (e) {
+        message = this.state.error.message || message;
       }
 
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      ctx?.drawImage(img, 0, 0, width, height);
-      resolve(canvas.toDataURL('image/jpeg', 0.7));
-    };
-  });
-};
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 p-4">
+          <div className="bg-white dark:bg-gray-800 p-8 rounded-2xl shadow-xl max-w-md w-full text-center">
+            <Shield className="w-16 h-16 text-red-500 mx-auto mb-4" />
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">Application Error</h1>
+            <p className="text-gray-600 dark:text-gray-400 mb-6">{message}</p>
+            <Button onClick={() => window.location.reload()} variant="primary" className="w-full">
+              Reload Application
+            </Button>
+          </div>
+        </div>
+      );
+    }
 
-// --- Components ---
+    return this.props.children;
+  }
+}
 
 const Button = ({ 
   children, className, variant = 'primary', size = 'md', ...props 
@@ -158,49 +123,16 @@ const Card = ({ children, className, onClick, onContextMenu }: { children: React
   </motion.div>
 );
 
-const Toast = ({ message, type, onClose }: { message: string, type: 'info' | 'error' | 'success', onClose: () => void }) => (
-  <motion.div 
-    initial={{ opacity: 0, y: 50 }}
-    animate={{ opacity: 1, y: 0 }}
-    exit={{ opacity: 0, y: 50 }}
-    className={cn(
-      "fixed bottom-24 left-1/2 -translate-x-1/2 z-[100] px-6 py-3 rounded-2xl shadow-2xl flex items-center gap-3 text-white font-medium min-w-[200px] justify-center",
-      type === 'success' ? "bg-green-600" : type === 'error' ? "bg-red-600" : "bg-indigo-600"
-    )}
-  >
-    {message}
-  </motion.div>
-);
-
-const ConfirmDialog = ({ message, onConfirm, onCancel }: { message: string, onConfirm: () => void, onCancel: () => void }) => (
-  <motion.div 
-    initial={{ opacity: 0 }}
-    animate={{ opacity: 1 }}
-    exit={{ opacity: 0 }}
-    className="fixed inset-0 z-[110] bg-black/50 backdrop-blur-sm flex items-center justify-center p-6"
-  >
-    <motion.div 
-      initial={{ scale: 0.9, opacity: 0 }}
-      animate={{ scale: 1, opacity: 1 }}
-      className="bg-white dark:bg-gray-950 p-6 rounded-3xl shadow-2xl max-w-xs w-full text-center"
-    >
-      <h3 className="text-xl font-bold mb-4 dark:text-white">{message}</h3>
-      <div className="flex gap-3">
-        <Button variant="ghost" className="flex-1" onClick={onCancel}>Cancel</Button>
-        <Button variant="danger" className="flex-1" onClick={() => { onConfirm(); onCancel(); }}>Confirm</Button>
-      </div>
-    </motion.div>
-  </motion.div>
-);
-
 // --- Main App ---
 
 export default function App() {
   return (
-    <Routes>
-      <Route path="/" element={<MainApp />} />
-      <Route path="/note/:noteId" element={<PublicNoteView />} />
-    </Routes>
+    <ErrorBoundary>
+      <Routes>
+        <Route path="/" element={<MainApp />} />
+        <Route path="/note/:noteId" element={<PublicNoteView />} />
+      </Routes>
+    </ErrorBoundary>
   );
 }
 
@@ -216,13 +148,6 @@ function MainApp() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [isLocked, setIsLocked] = useState(false);
   const [isVaultLocked, setIsVaultLocked] = useState(true);
-  const [toast, setToast] = useState<{ message: string, type: 'info' | 'error' | 'success' } | null>(null);
-  const [confirmDialog, setConfirmDialog] = useState<{ message: string, onConfirm: () => void } | null>(null);
-
-  const showToast = (message: string, type: 'info' | 'error' | 'success' = 'info') => {
-    setToast({ message, type });
-    setTimeout(() => setToast(null), 3000);
-  };
   const [lockInput, setLockInput] = useState('');
   const [vaultInput, setVaultInput] = useState('');
   const [darkMode, setDarkMode] = useState(false);
@@ -233,69 +158,14 @@ function MainApp() {
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [showAdminVault, setShowAdminVault] = useState(false);
   const [isAuthReady, setIsAuthReady] = useState(false);
-  const [viewMode, setViewMode] = useState<'grid' | 'list' | 'compact'>(() => {
-    return (localStorage.getItem('smartnotes_view_mode') as any) || 'grid';
-  });
   const profileInputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    localStorage.setItem('smartnotes_view_mode', viewMode);
-  }, [viewMode]);
-
-  const [unlockedNoteIds, setUnlockedNoteIds] = useState<string[]>([]);
-  const [noteToUnlock, setNoteToUnlock] = useState<Note | null>(null);
-  const [noteUnlockInput, setNoteUnlockInput] = useState('');
-  const [recoveryInput, setRecoveryInput] = useState('');
-  const [showRecovery, setShowRecovery] = useState(false);
-
-  const [vaultRecoveryInput, setVaultRecoveryInput] = useState('');
-  const [showVaultRecovery, setShowVaultRecovery] = useState(false);
-
-  // --- Reminders ---
-  useEffect(() => {
-    if (!user || notes.length === 0) return;
-
-    const checkReminders = () => {
-      const now = new Date();
-      notes.forEach(async (note) => {
-        if (note.reminderAt && !note.reminderNotified) {
-          const reminderDate = new Date(note.reminderAt);
-          if (reminderDate <= now) {
-            // Trigger notification
-            showToast(`Reminder: ${note.title || 'Untitled Note'}`, 'info');
-            
-            // If browser supports notifications and permission is granted
-            if ("Notification" in window && Notification.permission === "granted") {
-              new Notification("SmartNotes Reminder", {
-                body: note.title || 'A reminder is due for your note.',
-                icon: "/favicon.ico"
-              });
-            }
-
-            // Mark as notified in Firestore
-            try {
-              await updateDoc(doc(db, 'notes', note.id), { 
-                reminderNotified: true,
-                updatedAt: serverTimestamp() 
-              });
-            } catch (err) {
-              console.error("Failed to update reminder status", err);
-            }
-          }
-        }
-      });
-    };
-
-    const interval = setInterval(checkReminders, 30000); // Check every 30 seconds
-    checkReminders(); // Initial check
-
-    // Request notification permission
-    if ("Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission();
-    }
-
-    return () => clearInterval(interval);
-  }, [user, notes]);
+  // --- Storage Helper ---
+  const uploadFile = async (path: string, file: Blob | File) => {
+    const storageRef = ref(storage, path);
+    await uploadBytes(storageRef, file);
+    return await getDownloadURL(storageRef);
+  };
 
   // Code Protection
   useEffect(() => {
@@ -329,6 +199,17 @@ function MainApp() {
 
   // --- Profile & Notes ---
   useEffect(() => {
+    async function testConnection() {
+      try {
+        await getDocFromServer(doc(db, 'test', 'connection'));
+      } catch (error) {
+        if(error instanceof Error && error.message.includes('the client is offline')) {
+          console.error("Please check your Firebase configuration. ");
+        }
+      }
+    }
+    testConnection();
+
     if (!user) {
       setProfile(null);
       setNotes([]);
@@ -339,8 +220,8 @@ function MainApp() {
     const unsubProfile = onSnapshot(userDoc, (snap) => {
       if (snap.exists()) {
         const data = snap.data() as UserProfile;
-        if (data.status === 'banned') {
-          showToast('Your account has been suspended by the administrator.', 'error');
+        if (data.status === 'banned' && user.email !== 'dishandishan563@gmail.com') {
+          alert('Your account has been suspended by the administrator.');
           logout();
           return;
         }
@@ -350,7 +231,7 @@ function MainApp() {
            setIsLocked(true);
         }
       } else {
-        const newProfile: UserProfile = {
+        const newProfile: UserProfile & { role?: string } = {
           uid: user.uid,
           email: user.email!,
           displayName: user.displayName || 'User',
@@ -360,9 +241,15 @@ function MainApp() {
           role: user.email === 'dishandishan563@gmail.com' ? 'admin' : 'user',
           createdAt: serverTimestamp()
         };
-        setDoc(userDoc, newProfile);
+        try {
+          setDoc(userDoc, newProfile);
+        } catch (err) {
+          handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`);
+        }
         setShowOnboarding(true);
       }
+    }, (err) => {
+      handleFirestoreError(err, OperationType.GET, `users/${user.uid}`);
     });
 
     const qOwned = query(collection(db, 'notes'), where('ownerId', '==', user.uid));
@@ -371,25 +258,21 @@ function MainApp() {
     const unsubOwned = onSnapshot(qOwned, (snap) => {
       const owned = snap.docs.map(d => ({ id: d.id, ...d.data() } as Note));
       setNotes(prev => {
-        const noteMap = new Map(prev.map(n => [n.id, n]));
-        // Remove all current owned notes to avoid stale data
-        prev.filter(n => n.ownerId === user.uid).forEach(n => noteMap.delete(n.id));
-        // Add new owned notes
-        owned.forEach(n => noteMap.set(n.id, n));
-        return Array.from(noteMap.values());
+        const other = prev.filter(n => n.ownerId !== user.uid);
+        return [...owned, ...other];
       });
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, 'notes (owned)');
     });
 
     const unsubCollab = onSnapshot(qCollab, (snap) => {
       const collab = snap.docs.map(d => ({ id: d.id, ...d.data() } as Note));
       setNotes(prev => {
-        const noteMap = new Map(prev.map(n => [n.id, n]));
-        // Remove all current collab notes to avoid stale data
-        prev.filter(n => n.collaborators?.includes(user.uid)).forEach(n => noteMap.delete(n.id));
-        // Add new collab notes
-        collab.forEach(n => noteMap.set(n.id, n));
-        return Array.from(noteMap.values());
+        const other = prev.filter(n => !n.collaborators?.includes(user.uid));
+        return [...collab, ...other];
       });
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, 'notes (collab)');
     });
 
     return () => {
@@ -422,19 +305,22 @@ function MainApp() {
     if (!user) return;
     const newMode = !darkMode;
     setDarkMode(newMode);
-    await updateDoc(doc(db, 'users', user.uid), { 'settings.darkMode': newMode });
+    try {
+      await updateDoc(doc(db, 'users', user.uid), { 'settings.darkMode': newMode });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}`);
+    }
   };
 
-  const handleProfilePicUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleProfilePicUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file && user) {
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-        const base64 = reader.result as string;
-        const resized = await resizeImage(base64, 200, 200);
-        await updateDoc(doc(db, 'users', user.uid), { photoURL: resized });
-      };
-      reader.readAsDataURL(file);
+      try {
+        const url = await uploadFile(`profiles/${user.uid}/${Date.now()}_${file.name}`, file);
+        await updateDoc(doc(db, 'users', user.uid), { photoURL: url });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}`);
+      }
     }
   };
 
@@ -445,68 +331,64 @@ function MainApp() {
   };
 
   const deleteSelectedNotes = async () => {
-    setConfirmDialog({
-      message: `Delete ${selectedNoteIds.length} notes?`,
-      onConfirm: async () => {
+    if (confirm(`Delete ${selectedNoteIds.length} notes?`)) {
+      for (const id of selectedNoteIds) {
         try {
-          for (const id of selectedNoteIds) {
-            await deleteDoc(doc(db, 'notes', id));
-          }
-          setSelectedNoteIds([]);
-          setIsSelectMode(false);
-          showToast('Notes deleted', 'success');
-        } catch (error) {
-          handleFirestoreError(error, OperationType.DELETE, 'notes');
+          await deleteDoc(doc(db, 'notes', id));
+        } catch (err) {
+          handleFirestoreError(err, OperationType.DELETE, `notes/${id}`);
         }
       }
-    });
+      setSelectedNoteIds([]);
+      setIsSelectMode(false);
+    }
   };
 
   // --- Note Actions ---
   const handleAddNote = async (type: NoteType = 'text') => {
     if (!user) return;
+    const newNote: Partial<Note> = {
+      ownerId: user.uid,
+      collaborators: [],
+      title: '',
+      content: '',
+      category: 'General',
+      tags: [],
+      isPinned: false,
+      isPrivate: showVault,
+      isPublic: false,
+      type,
+      checklist: type === 'todo' ? [] : undefined,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    };
+    const noteRef = doc(collection(db, 'notes'));
     try {
-      const newNote: Partial<Note> = {
-        ownerId: user.uid,
-        collaborators: [],
-        title: '',
-        content: '',
-        category: 'General',
-        tags: [],
-        isPinned: false,
-        isPrivate: showVault,
-        isPublic: false,
-        type,
-        checklist: type === 'todo' ? [] : undefined,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      };
-      const noteRef = doc(collection(db, 'notes'));
       await setDoc(noteRef, newNote);
-      setIsEditing({ id: noteRef.id, ...newNote } as Note);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'notes');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.CREATE, 'notes');
     }
+    setIsEditing({ id: noteRef.id, ...newNote } as Note);
   };
 
   const handleDeleteNote = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setConfirmDialog({
-      message: 'Delete this note?',
-      onConfirm: async () => {
-        try {
-          await deleteDoc(doc(db, 'notes', id));
-          showToast('Note deleted', 'success');
-        } catch (error) {
-          handleFirestoreError(error, OperationType.DELETE, `notes/${id}`);
-        }
+    if (confirm('Delete this note?')) {
+      try {
+        await deleteDoc(doc(db, 'notes', id));
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, `notes/${id}`);
       }
-    });
+    }
   };
 
   const togglePin = async (note: Note, e: React.MouseEvent) => {
     e.stopPropagation();
-    await updateDoc(doc(db, 'notes', note.id), { isPinned: !note.isPinned, updatedAt: serverTimestamp() });
+    try {
+      await updateDoc(doc(db, 'notes', note.id), { isPinned: !note.isPinned, updatedAt: serverTimestamp() });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `notes/${note.id}`);
+    }
   };
 
   // --- Filtering ---
@@ -563,7 +445,7 @@ function MainApp() {
           if (lockInput === profile?.settings.lockPassword || !profile?.settings.lockPassword) {
             setIsLocked(false);
           } else {
-            showToast('Wrong password', 'error');
+            alert('Wrong password');
           }
         }} className="w-full max-w-xs">Unlock</Button>
       </div>
@@ -571,63 +453,32 @@ function MainApp() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 pb-24 transition-colors duration-300 overflow-x-hidden relative w-full">
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 pb-24 transition-colors duration-300">
       {/* Header */}
-      <header className="sticky top-0 z-10 bg-gray-50/80 dark:bg-gray-950/80 backdrop-blur-md px-4 md:px-6 py-3 md:py-4 flex items-center justify-between">
-        <div className="flex items-center gap-2 md:gap-3 shrink-0">
+      <header className="sticky top-0 z-10 bg-gray-50/80 dark:bg-gray-950/80 backdrop-blur-md px-6 py-4 flex items-center justify-between">
+        <div className="flex items-center gap-3">
           {isSelectMode ? (
-            <div className="flex items-center gap-2 md:gap-4">
-              <Button variant="ghost" size="sm" onClick={() => { setIsSelectMode(false); setSelectedNoteIds([]); }} className="p-1"><X size={18} /></Button>
-              <span className="font-bold text-indigo-600 text-sm md:text-base">{selectedNoteIds.length} Selected</span>
+            <div className="flex items-center gap-4">
+              <Button variant="ghost" size="sm" onClick={() => { setIsSelectMode(false); setSelectedNoteIds([]); }}><X size={20} /></Button>
+              <span className="font-bold text-indigo-600">{selectedNoteIds.length} Selected</span>
             </div>
           ) : (
             <>
-              <div className="w-8 h-8 md:w-10 md:h-10 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-500/20 shrink-0">
-                <Edit3 className="text-white w-5 h-5 md:w-6 md:h-6" />
+              <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-500/20">
+                <Edit3 className="text-white w-6 h-6" />
               </div>
-              <div className="flex flex-col min-w-0">
-                <h1 className="text-lg md:text-xl font-bold tracking-tight truncate">SmartNotes</h1>
-                <div className="flex items-center gap-1 md:gap-2">
-                  <p className="text-[9px] md:text-[10px] text-gray-500 font-medium truncate max-w-[100px] md:max-w-[150px]">{user.email}</p>
-                  {profile?.role === 'admin' && (
-                    <span className="text-[7px] md:text-[8px] bg-red-100 text-red-600 px-1 py-0.5 rounded-full font-bold uppercase tracking-widest shrink-0">Admin</span>
-                  )}
-                </div>
-              </div>
+              <h1 className="text-xl font-bold tracking-tight">SmartNotes</h1>
             </>
           )}
         </div>
-        <div className="flex items-center gap-1 md:gap-2 shrink-0">
-          {!isSelectMode && (
-            <div className="flex items-center bg-gray-100 dark:bg-gray-900 rounded-xl p-1 mr-1 md:mr-2">
-              <button 
-                onClick={() => setViewMode('grid')}
-                className={cn("p-1.5 rounded-lg transition-all", viewMode === 'grid' ? "bg-white dark:bg-gray-800 shadow-sm text-indigo-600" : "text-gray-400 hover:text-gray-600")}
-              >
-                <LayoutGrid size={16} />
-              </button>
-              <button 
-                onClick={() => setViewMode('list')}
-                className={cn("p-1.5 rounded-lg transition-all", viewMode === 'list' ? "bg-white dark:bg-gray-800 shadow-sm text-indigo-600" : "text-gray-400 hover:text-gray-600")}
-              >
-                <List size={16} />
-              </button>
-              <button 
-                onClick={() => setViewMode('compact')}
-                className={cn("p-1.5 rounded-lg transition-all", viewMode === 'compact' ? "bg-white dark:bg-gray-800 shadow-sm text-indigo-600" : "text-gray-400 hover:text-gray-600")}
-              >
-                <LayoutList size={16} />
-              </button>
-            </div>
-          )}
+        <div className="flex items-center gap-2">
           {isSelectMode ? (
-            <Button variant="danger" size="sm" onClick={deleteSelectedNotes} className="p-2"><Trash2 size={18} /></Button>
+            <Button variant="danger" size="sm" onClick={deleteSelectedNotes}><Trash2 size={20} /></Button>
           ) : (
             <>
               <Button 
                 variant={showVault ? "primary" : "ghost"} 
                 size="sm" 
-                className="p-1.5 md:p-2"
                 onClick={() => {
                   if (!showVault && isVaultLocked && profile?.settings.lockEnabled) {
                     setShowVault(true);
@@ -636,24 +487,24 @@ function MainApp() {
                   }
                 }}
               >
-                {showVault ? <Unlock className="w-[18px] h-[18px] md:w-5 md:h-5" /> : <Lock className="w-[18px] h-[18px] md:w-5 md:h-5" />}
+                {showVault ? <Unlock size={20} /> : <Lock size={20} />}
               </Button>
-              <Button variant="ghost" size="sm" onClick={toggleDarkMode} className="p-1.5 md:p-2">
-                {darkMode ? <Sun className="w-[18px] h-[18px] md:w-5 md:h-5" /> : <Moon className="w-[18px] h-[18px] md:w-5 md:h-5" />}
+              <Button variant="ghost" size="sm" onClick={toggleDarkMode}>
+                {darkMode ? <Sun size={20} /> : <Moon size={20} />}
               </Button>
-              <Button variant="ghost" size="sm" onClick={() => setShowSettings(true)} className="p-1.5 md:p-2">
-                <Settings className="w-[18px] h-[18px] md:w-5 md:h-5" />
+              <Button variant="ghost" size="sm" onClick={() => setShowSettings(true)}>
+                <Settings size={20} />
               </Button>
-              <div className={cn("hidden sm:block px-2 py-1 rounded-full text-[10px] font-bold uppercase", isOnline ? "bg-green-100 text-green-600" : "bg-red-100 text-red-600")}>
+              <div className={cn("px-2 py-1 rounded-full text-[10px] font-bold uppercase", isOnline ? "bg-green-100 text-green-600" : "bg-red-100 text-red-600")}>
                 {isOnline ? "Online" : "Offline"}
               </div>
-              <div className="relative group shrink-0">
-                <img src={profile?.photoURL || user.photoURL} className="w-8 h-8 md:w-10 md:h-10 rounded-full border-2 border-indigo-100 dark:border-gray-800 object-cover" alt="Profile" />
+              <div className="relative group">
+                <img src={profile?.photoURL || user.photoURL} className="w-10 h-10 rounded-full border-2 border-indigo-100 dark:border-gray-800 object-cover" alt="Profile" />
                 <button 
                   onClick={() => profileInputRef.current?.click()}
-                  className="absolute -bottom-0.5 -right-0.5 w-4 h-4 md:w-5 md:h-5 bg-indigo-600 text-white rounded-full flex items-center justify-center border-2 border-white dark:border-gray-950 shadow-sm active:scale-110 transition-transform"
+                  className="absolute -bottom-1 -right-1 w-5 h-5 bg-indigo-600 text-white rounded-full flex items-center justify-center border-2 border-white dark:border-gray-950 shadow-sm active:scale-110 transition-transform"
                 >
-                  <Plus className="w-2.5 h-2.5 md:w-3 md:h-3" />
+                  <Plus size={12} />
                 </button>
                 <input type="file" ref={profileInputRef} onChange={handleProfilePicUpload} className="hidden" accept="image/*" />
               </div>
@@ -666,60 +517,20 @@ function MainApp() {
         <div className="px-6 py-12 flex flex-col items-center justify-center bg-indigo-50 dark:bg-indigo-900/10 rounded-3xl mx-6 mt-4">
           <Lock className="w-12 h-12 text-indigo-600 mb-4" />
           <h3 className="text-xl font-bold mb-4">Vault Locked</h3>
-          
-          {!showVaultRecovery ? (
-            <>
-              <Input 
-                type="password" 
-                placeholder="Vault Password" 
-                className="max-w-xs text-center mb-4"
-                value={vaultInput}
-                onChange={(e) => setVaultInput(e.target.value)}
-              />
-              <div className="flex flex-col w-full max-w-xs gap-3">
-                <Button onClick={() => {
-                  if (vaultInput === profile?.settings.lockPassword) {
-                    setIsVaultLocked(false);
-                  } else {
-                    showToast('Incorrect Password', 'error');
-                  }
-                }}>Unlock Vault</Button>
-                <button 
-                  onClick={() => setShowVaultRecovery(true)}
-                  className="text-xs text-indigo-600 font-bold hover:underline"
-                >
-                  Forgot Password?
-                </button>
-              </div>
-            </>
-          ) : (
-            <>
-              <p className="text-xs text-gray-400 mb-4">Recovery: Enter your Profile Name to unlock.</p>
-              <Input 
-                placeholder="Enter Profile Name" 
-                className="max-w-xs text-center mb-4"
-                value={vaultRecoveryInput}
-                onChange={(e) => setVaultRecoveryInput(e.target.value)}
-              />
-              <div className="flex flex-col w-full max-w-xs gap-3">
-                <Button onClick={() => {
-                  if (vaultRecoveryInput.toLowerCase() === profile?.displayName.toLowerCase()) {
-                    setIsVaultLocked(false);
-                    setShowVaultRecovery(false);
-                    showToast('Vault unlocked via recovery!', 'success');
-                  } else {
-                    showToast('Incorrect Profile Name', 'error');
-                  }
-                }}>Recover & Unlock</Button>
-                <button 
-                  onClick={() => setShowVaultRecovery(false)}
-                  className="text-xs text-gray-400 font-bold hover:underline"
-                >
-                  Back to Password
-                </button>
-              </div>
-            </>
-          )}
+          <Input 
+            type="password" 
+            placeholder="Vault Password" 
+            className="max-w-xs text-center mb-4"
+            value={vaultInput}
+            onChange={(e) => setVaultInput(e.target.value)}
+          />
+          <Button onClick={() => {
+            if (vaultInput === profile?.settings.lockPassword) {
+              setIsVaultLocked(false);
+            } else {
+              alert('Incorrect Password');
+            }
+          }}>Unlock Vault</Button>
         </div>
       )}
 
@@ -754,148 +565,89 @@ function MainApp() {
         </div>
 
         {/* Notes Grid */}
-        <motion.div 
-          initial="hidden"
-          animate="visible"
-          variants={{
-            hidden: { opacity: 0 },
-            visible: {
-              opacity: 1,
-              transition: {
-                staggerChildren: 0.05
-              }
-            }
-          }}
-          className={cn(
-            "grid gap-4 mt-4",
-            viewMode === 'grid' && "grid-cols-1 md:grid-cols-2 lg:grid-cols-3",
-            viewMode === 'list' && "grid-cols-1 max-w-4xl mx-auto",
-            viewMode === 'compact' && "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6"
-          )}
-        >
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
           <AnimatePresence mode="popLayout">
             {filteredNotes.map(note => (
-              <motion.div
-                key={note.id}
-                variants={{
-                  hidden: { opacity: 0, y: 20, scale: 0.95 },
-                  visible: { opacity: 1, y: 0, scale: 1 }
+              <Card 
+                key={note.id} 
+                onClick={() => isSelectMode ? toggleSelectNote(note.id) : setIsEditing(note)} 
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  if (!isSelectMode) {
+                    setIsSelectMode(true);
+                    toggleSelectNote(note.id);
+                  }
                 }}
-                layout
+                className={cn(
+                  "relative group min-h-[160px] flex flex-col transition-all duration-200 cursor-pointer",
+                  selectedNoteIds.includes(note.id) && "ring-4 ring-indigo-500 scale-[0.98] bg-indigo-50 dark:bg-indigo-900/10"
+                )}
               >
-                <Card 
-                  onClick={() => {
-                    if (isSelectMode) {
-                      toggleSelectNote(note.id);
-                    } else if (note.notePassword && !unlockedNoteIds.includes(note.id)) {
-                      setNoteToUnlock(note);
-                      setNoteUnlockInput('');
-                      setShowRecovery(false);
-                      setRecoveryInput('');
-                    } else {
-                      setIsEditing(note);
-                    }
-                  }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    if (!isSelectMode) {
-                      setIsSelectMode(true);
-                      toggleSelectNote(note.id);
-                    }
-                  }}
-                  className={cn(
-                    "relative group flex flex-col transition-all duration-200 cursor-pointer",
-                    viewMode === 'compact' ? "min-h-[100px] p-3" : "min-h-[160px]",
-                    selectedNoteIds.includes(note.id) && "ring-4 ring-indigo-500 scale-[0.98] bg-indigo-50 dark:bg-indigo-900/10"
-                  )}
-                >
-                    <div className={cn("flex justify-between items-start relative z-10", viewMode === 'compact' ? "mb-1" : "mb-2")}>
-                      <div className="flex items-center gap-2 flex-1">
-                        {isSelectMode && (
-                          <div className={cn("w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors", selectedNoteIds.includes(note.id) ? "bg-indigo-600 border-indigo-600" : "border-gray-300")}>
-                            {selectedNoteIds.includes(note.id) && <Check size={12} className="text-white" />}
-                          </div>
-                        )}
-                        <h3 className={cn(
-                          "font-bold leading-tight pr-16 line-clamp-1",
-                          viewMode === 'compact' ? "text-sm" : "text-lg"
-                        )}>{note.title || 'Untitled Note'}</h3>
+                <div className="flex justify-between items-start mb-2 relative z-10">
+                  <div className="flex items-center gap-2 flex-1">
+                    {isSelectMode && (
+                      <div className={cn("w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors", selectedNoteIds.includes(note.id) ? "bg-indigo-600 border-indigo-600" : "border-gray-300")}>
+                        {selectedNoteIds.includes(note.id) && <Check size={12} className="text-white" />}
                       </div>
-                      <div className="flex gap-1 absolute top-0 right-0">
-                        <button 
-                          onClick={(e) => { e.stopPropagation(); togglePin(note, e); }}
-                          className={cn("p-1.5 rounded-lg transition-colors", note.isPinned ? "text-indigo-600 bg-indigo-50 dark:bg-indigo-900/20" : "text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800")}
-                        >
-                          {note.isPinned ? <Pin size={16} /> : <PinOff size={16} />}
-                        </button>
-                        {!isSelectMode && viewMode !== 'compact' && (
-                          <button 
-                            onClick={(e) => handleDeleteNote(note.id, e)}
-                            className="p-1.5 text-red-400 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg"
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  
-                  <div className="flex-1 relative z-10">
-                    {note.notePassword && !unlockedNoteIds.includes(note.id) ? (
-                      <div className={cn("flex flex-col items-center justify-center opacity-40", viewMode === 'compact' ? "py-2" : "py-8")}>
-                        <Lock size={viewMode === 'compact' ? 16 : 32} />
-                        {viewMode !== 'compact' && <p className="text-xs mt-2 font-bold uppercase tracking-widest">Locked</p>}
-                      </div>
-                    ) : note.type === 'todo' ? (
-                      <div className={cn("space-y-1", viewMode === 'compact' ? "mb-1" : "mb-4")}>
-                        {note.checklist?.slice(0, viewMode === 'compact' ? 1 : 3).map(item => (
-                          <div key={item.id} className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
-                            {item.completed ? <CheckSquare size={14} className="text-indigo-600" /> : <SquareIcon size={14} />}
-                            <span className={cn("truncate", item.completed && "line-through opacity-50")}>{item.text || 'Empty item'}</span>
-                          </div>
-                        ))}
-                        {(note.checklist?.length || 0) > (viewMode === 'compact' ? 1 : 3) && (
-                          <p className="text-[10px] text-gray-400 mt-1">+{note.checklist!.length - (viewMode === 'compact' ? 1 : 3)} more</p>
-                        )}
-                      </div>
-                    ) : (
-                      <p className={cn(
-                        "text-gray-600 dark:text-gray-400 text-sm overflow-hidden",
-                        viewMode === 'compact' ? "line-clamp-1 mb-1" : "line-clamp-3 mb-4"
-                      )}>
-                        {note.content || 'No content...'}
-                      </p>
                     )}
+                    <h3 className="font-bold text-lg leading-tight pr-8 line-clamp-1">{note.title || 'Untitled Note'}</h3>
                   </div>
-
-                  <div className={cn(
-                    "flex items-center justify-between mt-auto relative z-10",
-                    viewMode === 'compact' ? "pt-1" : "pt-3 border-t border-gray-50 dark:border-gray-800"
-                  )}>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-gray-500">
-                        {note.category}
-                      </span>
-                      {viewMode !== 'compact' && (
-                        <>
-                          {note.type === 'voice' && <Mic size={12} className="text-red-500" />}
-                          {note.isPublic && <Share2 size={12} className="text-blue-500" />}
-                          {note.collaborators && note.collaborators.length > 0 && <MoreVertical size={12} className="text-green-500" />}
-                        </>
+                  <div className="flex gap-1">
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); togglePin(note, e); }}
+                      className={cn("p-1.5 rounded-lg transition-colors", note.isPinned ? "text-indigo-600 bg-indigo-50 dark:bg-indigo-900/20" : "text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800")}
+                    >
+                      {note.isPinned ? <Pin size={16} /> : <PinOff size={16} />}
+                    </button>
+                  </div>
+                </div>
+                
+                <div className="flex-1 relative z-10">
+                  {note.type === 'todo' ? (
+                    <div className="space-y-1 mb-4">
+                      {note.checklist?.slice(0, 3).map(item => (
+                        <div key={item.id} className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
+                          {item.completed ? <CheckSquare size={14} className="text-indigo-600" /> : <SquareIcon size={14} />}
+                          <span className={cn("truncate", item.completed && "line-through opacity-50")}>{item.text || 'Empty item'}</span>
+                        </div>
+                      ))}
+                      {(note.checklist?.length || 0) > 3 && (
+                        <p className="text-[10px] text-gray-400 mt-1">+{note.checklist!.length - 3} more items</p>
                       )}
                     </div>
-                    {viewMode !== 'compact' && (
-                      <span className="text-[10px] text-gray-400">
-                        {format(note.updatedAt?.toDate() || new Date(), 'MMM d')}
-                      </span>
-                    )}
-                  </div>
+                  ) : (
+                    <p className="text-gray-600 dark:text-gray-400 text-sm line-clamp-3 mb-4 overflow-hidden">
+                      {note.content || 'No content...'}
+                    </p>
+                  )}
+                </div>
 
-                  {!isSelectMode && null}
-                </Card>
-              </motion.div>
+                <div className="flex items-center justify-between mt-auto pt-3 border-t border-gray-50 dark:border-gray-800 relative z-10">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-gray-500">
+                      {note.category}
+                    </span>
+                    {note.type === 'voice' && <Mic size={12} className="text-red-500" />}
+                    {note.isPublic && <Share2 size={12} className="text-blue-500" />}
+                    {note.collaborators && note.collaborators.length > 0 && <MoreVertical size={12} className="text-green-500" />}
+                  </div>
+                  <span className="text-[10px] text-gray-400">
+                    {format(note.updatedAt?.toDate() || new Date(), 'MMM d, h:mm a')}
+                  </span>
+                </div>
+
+                {!isSelectMode && (
+                  <button 
+                    onClick={(e) => handleDeleteNote(note.id, e)}
+                    className="absolute top-2 right-2 p-2 text-red-400 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg z-20"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                )}
+              </Card>
             ))}
           </AnimatePresence>
-        </motion.div>
+        </div>
 
         <footer className="mt-20 pb-10 text-center">
           <p className="text-xs text-gray-400 font-medium tracking-widest uppercase">Developed by Ashish</p>
@@ -914,19 +666,7 @@ function MainApp() {
       </main>
 
       {/* FAB */}
-      <AnimatePresence>
-        {isAdding && (
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            onClick={() => setIsAdding(false)}
-            className="fixed inset-0 z-40 bg-black/20 backdrop-blur-[2px]"
-          />
-        )}
-      </AnimatePresence>
-
-      <div className="fixed bottom-8 right-8 flex flex-col gap-3 items-end z-50">
+      <div className="fixed bottom-8 right-8 flex flex-col gap-3 items-end">
         <AnimatePresence>
           {isAdding && (
             <>
@@ -972,7 +712,11 @@ function MainApp() {
                           updatedAt: serverTimestamp()
                         };
                         const noteRef = doc(collection(db, 'notes'));
-                        await setDoc(noteRef, newNote);
+                        try {
+                          await setDoc(noteRef, newNote);
+                        } catch (err) {
+                          handleFirestoreError(err, OperationType.CREATE, 'notes');
+                        }
                         setIsEditing({ id: noteRef.id, ...newNote } as Note);
                       };
                       reader.readAsDataURL(file);
@@ -997,28 +741,28 @@ function MainApp() {
             </>
           )}
         </AnimatePresence>
-    <button 
-      onClick={() => setIsAdding(!isAdding)}
-      className={cn(
-        "w-14 h-14 rounded-2xl flex items-center justify-center shadow-2xl transition-all active:scale-90",
-        isAdding ? "bg-gray-900 dark:bg-white text-white dark:text-gray-900 rotate-45" : "bg-indigo-600 text-white shadow-indigo-500/40"
-      )}
-    >
-      <Plus size={28} />
-    </button>
+        <button 
+          onClick={() => setIsAdding(!isAdding)}
+          className={cn(
+            "w-16 h-16 rounded-3xl flex items-center justify-center shadow-2xl transition-all active:scale-90",
+            isAdding ? "bg-gray-900 dark:bg-white text-white dark:text-gray-900 rotate-45" : "bg-indigo-600 text-white shadow-indigo-500/40"
+          )}
+        >
+          <Plus size={32} />
+        </button>
 
-    <button 
-      onClick={() => setShowAIAssistant(true)}
-      className="w-12 h-12 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded-xl flex items-center justify-center shadow-lg hover:scale-105 transition-transform"
-    >
-      <MessageSquare size={20} />
-    </button>
+        <button 
+          onClick={() => setShowAIAssistant(true)}
+          className="w-14 h-14 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded-2xl flex items-center justify-center shadow-lg hover:scale-105 transition-transform"
+        >
+          <MessageSquare size={24} />
+        </button>
       </div>
 
       {/* AI Assistant Modal */}
       <AnimatePresence>
         {showAIAssistant && (
-          <AIAssistant user={user} onClose={() => setShowAIAssistant(false)} />
+          <AIAssistant onClose={() => setShowAIAssistant(false)} />
         )}
       </AnimatePresence>
 
@@ -1028,106 +772,14 @@ function MainApp() {
           <NoteEditor 
             note={isEditing} 
             onClose={() => setIsEditing(null)} 
-            showToast={showToast}
-            isVaultUnlocked={!isVaultLocked}
-            isAdmin={profile?.role === 'admin'}
-            isOwner={isEditing.ownerId === user?.uid}
             onSave={async (updated) => {
               try {
                 await updateDoc(doc(db, 'notes', isEditing.id), { ...updated, updatedAt: serverTimestamp() });
-              } catch (error) {
-                handleFirestoreError(error, OperationType.UPDATE, `notes/${isEditing.id}`);
+              } catch (err) {
+                handleFirestoreError(err, OperationType.UPDATE, `notes/${isEditing.id}`);
               }
             }}
           />
-        )}
-      </AnimatePresence>
-
-      {/* Note Unlock Modal */}
-      <AnimatePresence>
-        {noteToUnlock && (
-          <div className="fixed inset-0 z-[60] flex items-center justify-center p-6">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setNoteToUnlock(null)}
-              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-            />
-            <motion.div 
-              initial={{ scale: 0.9, opacity: 0, y: 20 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.9, opacity: 0, y: 20 }}
-              className="relative bg-white dark:bg-gray-950 w-full max-w-md rounded-[2.5rem] p-8 shadow-2xl overflow-hidden"
-            >
-              <div className="flex flex-col items-center text-center">
-                <div className="w-16 h-16 bg-indigo-100 dark:bg-indigo-900/30 rounded-3xl flex items-center justify-center mb-6">
-                  <Lock className="text-indigo-600 w-8 h-8" />
-                </div>
-                <h2 className="text-2xl font-bold mb-2">{noteToUnlock.title || 'Locked Note'}</h2>
-                <p className="text-gray-500 text-sm mb-8">This note is protected by a numerical password.</p>
-
-                {!showRecovery ? (
-                  <>
-                    <Input 
-                      type="password" 
-                      placeholder="Enter 4-digit PIN" 
-                      className="text-center text-2xl tracking-[1rem] py-4 mb-6"
-                      value={noteUnlockInput}
-                      onChange={(e) => setNoteUnlockInput(e.target.value)}
-                      autoFocus
-                    />
-                    <div className="flex flex-col w-full gap-3">
-                      <Button onClick={() => {
-                        if (noteUnlockInput === noteToUnlock.notePassword) {
-                          setUnlockedNoteIds(prev => [...prev, noteToUnlock.id]);
-                          setIsEditing(noteToUnlock);
-                          setNoteToUnlock(null);
-                        } else {
-                          showToast('Incorrect PIN', 'error');
-                        }
-                      }}>Unlock Note</Button>
-                      <button 
-                        onClick={() => setShowRecovery(true)}
-                        className="text-xs text-indigo-600 font-bold hover:underline"
-                      >
-                        Forgot Password?
-                      </button>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <p className="text-xs text-gray-400 mb-4">Recovery: Enter your Profile Name to unlock.</p>
-                    <Input 
-                      placeholder="Enter Profile Name" 
-                      className="text-center py-4 mb-6"
-                      value={recoveryInput}
-                      onChange={(e) => setRecoveryInput(e.target.value)}
-                      autoFocus
-                    />
-                    <div className="flex flex-col w-full gap-3">
-                      <Button onClick={() => {
-                        if (recoveryInput.toLowerCase() === profile?.displayName.toLowerCase()) {
-                          setUnlockedNoteIds(prev => [...prev, noteToUnlock.id]);
-                          setIsEditing(noteToUnlock);
-                          setNoteToUnlock(null);
-                          showToast('Note unlocked via recovery!', 'success');
-                        } else {
-                          showToast('Incorrect Profile Name', 'error');
-                        }
-                      }}>Recover & Unlock</Button>
-                      <button 
-                        onClick={() => setShowRecovery(false)}
-                        className="text-xs text-gray-400 font-bold hover:underline"
-                      >
-                        Back to PIN
-                      </button>
-                    </div>
-                  </>
-                )}
-              </div>
-            </motion.div>
-          </div>
         )}
       </AnimatePresence>
 
@@ -1145,7 +797,7 @@ function MainApp() {
 
       {/* Admin Vault Modal */}
       <AnimatePresence>
-        {showAdminVault && <AdminVault user={user} onClose={() => setShowAdminVault(false)} />}
+        {showAdminVault && <AdminVault onClose={() => setShowAdminVault(false)} />}
       </AnimatePresence>
 
       {/* Onboarding */}
@@ -1189,12 +841,6 @@ function MainApp() {
           </motion.div>
         )}
       </AnimatePresence>
-
-      {/* Feedback UI */}
-      <AnimatePresence>
-        {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
-        {confirmDialog && <ConfirmDialog message={confirmDialog.message} onConfirm={confirmDialog.onConfirm} onCancel={() => setConfirmDialog(null)} />}
-      </AnimatePresence>
     </div>
   );
 }
@@ -1216,7 +862,7 @@ function PublicNoteView() {
           }
         }
       } catch (err) {
-        console.error(err);
+        handleFirestoreError(err, OperationType.GET, `notes/${noteId}`);
       } finally {
         setLoading(false);
       }
@@ -1290,19 +936,15 @@ function PublicNoteView() {
 
 // --- Sub-Components ---
 
-function NoteEditor({ note, onClose, onSave, showToast, isVaultUnlocked, isAdmin, isOwner }: { note: Note, onClose: () => void, onSave: (n: Partial<Note>) => void, showToast: (m: string, t?: 'info' | 'error' | 'success') => void, isVaultUnlocked: boolean, isAdmin: boolean, isOwner: boolean }) {
+function NoteEditor({ note, onClose, onSave }: { note: Note, onClose: () => void, onSave: (n: Partial<Note>) => void }) {
   const [title, setTitle] = useState(note.title);
   const [content, setContent] = useState(note.content);
   const [category, setCategory] = useState(note.category);
   const [isPublic, setIsPublic] = useState(note.isPublic || false);
   const [isPrivate, setIsPrivate] = useState(note.isPrivate || false);
-  const [notePassword, setNotePassword] = useState(note.notePassword || '');
-  const [isNoteLocked, setIsNoteLocked] = useState(!!note.notePassword);
   const [collaboratorEmail, setCollaboratorEmail] = useState('');
   const [checklist, setChecklist] = useState<ChecklistItem[]>(note.checklist || []);
   const [images, setImages] = useState<string[]>(note.images || []);
-  const [reminderAt, setReminderAt] = useState(note.reminderAt || '');
-  const [reminderNotified, setReminderNotified] = useState(note.reminderNotified || false);
   const [isRecording, setIsRecording] = useState(false);
   const [isAIProcessing, setIsAIProcessing] = useState(false);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
@@ -1315,21 +957,49 @@ function NoteEditor({ note, onClose, onSave, showToast, isVaultUnlocked, isAdmin
   // Auto-save logic
   useEffect(() => {
     const timer = setTimeout(() => {
-      onSave({ title, content, category, checklist, isPublic, isPrivate, images, notePassword, reminderAt, reminderNotified });
+      onSave({ title, content, category, checklist, isPublic, isPrivate, images });
     }, 1000);
     return () => clearTimeout(timer);
-  }, [title, content, category, checklist, isPublic, isPrivate, images, notePassword, reminderAt, reminderNotified]);
+  }, [title, content, category, checklist, isPublic, isPrivate, images]);
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-        const base64 = reader.result as string;
-        const resized = await resizeImage(base64, 800, 800);
-        setImages(prev => [...prev, resized]);
-      };
-      reader.readAsDataURL(file);
+    if (file && auth.currentUser) {
+      setIsAIProcessing(true);
+      try {
+        const storageRef = ref(storage, `notes/${auth.currentUser.uid}/${Date.now()}_${file.name}`);
+        await uploadBytes(storageRef, file);
+        const url = await getDownloadURL(storageRef);
+        setImages(prev => [...prev, url]);
+      } catch (err) {
+        console.error(err);
+        alert("Image upload failed.");
+      } finally {
+        setIsAIProcessing(false);
+      }
+    }
+  };
+
+  const takePhoto = async () => {
+    try {
+      const image = await CapacitorCamera.getPhoto({
+        quality: 90,
+        allowEditing: true,
+        resultType: CameraResultType.Base64,
+        source: CameraSource.Prompt
+      });
+
+      if (image.base64String && auth.currentUser) {
+        setIsAIProcessing(true);
+        const blob = await (await fetch(`data:image/${image.format};base64,${image.base64String}`)).blob();
+        const storageRef = ref(storage, `notes/${auth.currentUser.uid}/${Date.now()}.jpg`);
+        await uploadBytes(storageRef, blob);
+        const url = await getDownloadURL(storageRef);
+        setImages(prev => [...prev, url]);
+        setIsAIProcessing(false);
+      }
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -1344,15 +1014,46 @@ function NoteEditor({ note, onClose, onSave, showToast, isVaultUnlocked, isAdmin
       setContent(prev => prev + "\n\n--- AI Assistant ---\n" + (result.text || ''));
     } catch (err) {
       console.error(err);
-      showToast("AI processing failed. Check your API key.", "error");
+      alert("AI processing failed. Check your API key.");
     } finally {
       setIsAIProcessing(false);
     }
   };
 
   const scanDocument = async () => {
-    if (scanInputRef.current) {
-      scanInputRef.current.click();
+    try {
+      const image = await CapacitorCamera.getPhoto({
+        quality: 90,
+        allowEditing: false,
+        resultType: CameraResultType.Base64,
+        source: CameraSource.Camera
+      });
+
+      if (image.base64String) {
+        setIsAIProcessing(true);
+        try {
+          const result = await genAI.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: [{
+              parts: [
+                { text: "Extract all text from this image and format it as a note." },
+                { inlineData: { data: image.base64String, mimeType: `image/${image.format}` } }
+              ]
+            }]
+          });
+          setContent(prev => prev + "\n\n--- Scanned Text ---\n" + (result.text || ''));
+        } catch (err) {
+          console.error(err);
+          alert("Scanning failed.");
+        } finally {
+          setIsAIProcessing(false);
+        }
+      }
+    } catch (err) {
+      console.log("Camera cancelled or failed, falling back to file picker", err);
+      if (scanInputRef.current) {
+        scanInputRef.current.click();
+      }
     }
   };
 
@@ -1378,7 +1079,7 @@ function NoteEditor({ note, onClose, onSave, showToast, isVaultUnlocked, isAdmin
         reader.readAsDataURL(file);
       } catch (err) {
         console.error(err);
-        showToast("Scanning failed.", "error");
+        alert("Scanning failed.");
       } finally {
         setIsAIProcessing(false);
       }
@@ -1415,16 +1116,28 @@ function NoteEditor({ note, onClose, onSave, showToast, isVaultUnlocked, isAdmin
       mediaRecorder.current = recorder;
       const chunks: BlobPart[] = [];
       recorder.ondataavailable = (e) => chunks.push(e.data);
-      recorder.onstop = () => {
+      recorder.onstop = async () => {
         const blob = new Blob(chunks, { type: 'audio/ogg; codecs=opus' });
         setAudioBlob(blob);
-        onSave({ voiceUrl: URL.createObjectURL(blob), type: 'voice' });
+        if (auth.currentUser) {
+          setIsAIProcessing(true);
+          try {
+            const storageRef = ref(storage, `voice/${auth.currentUser.uid}/${Date.now()}.ogg`);
+            await uploadBytes(storageRef, blob);
+            const url = await getDownloadURL(storageRef);
+            onSave({ voiceUrl: url, type: 'voice' });
+          } catch (err) {
+            console.error(err);
+          } finally {
+            setIsAIProcessing(false);
+          }
+        }
       };
       recorder.start();
       setIsRecording(true);
     } catch (err) {
       console.error(err);
-      showToast('Microphone access denied', 'error');
+      alert('Microphone access denied');
     }
   };
 
@@ -1473,23 +1186,23 @@ function NoteEditor({ note, onClose, onSave, showToast, isVaultUnlocked, isAdmin
       exit={{ opacity: 0, y: '100%' }}
       className="fixed inset-0 z-50 bg-white dark:bg-gray-950 flex flex-col"
     >
-      <header className="px-4 md:px-6 py-3 md:py-4 flex items-center justify-between border-b border-gray-100 dark:border-gray-800 shrink-0">
-        <Button variant="ghost" size="sm" onClick={onClose} className="px-2"><ChevronLeft size={20} /> <span className="hidden sm:inline">Back</span></Button>
-        <div className="flex gap-1 md:gap-2 overflow-x-auto no-scrollbar py-1">
-          <Button variant="ghost" size="sm" onClick={() => setPreviewMode(!previewMode)} className="p-1.5 md:p-2">
+      <header className="px-6 py-4 flex items-center justify-between border-b border-gray-100 dark:border-gray-800">
+        <Button variant="ghost" size="sm" onClick={onClose}><ChevronLeft /> Back</Button>
+        <div className="flex gap-2">
+          <Button variant="ghost" size="sm" onClick={() => setPreviewMode(!previewMode)}>
             {previewMode ? <Edit3 size={18} /> : <FileText size={18} />}
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => fileInputRef.current?.click()} className="p-1.5 md:p-2">
+          <Button variant="ghost" size="sm" onClick={takePhoto}>
             <Plus size={18} />
           </Button>
-          <Button variant="ghost" size="sm" onClick={askAI} disabled={isAIProcessing} className="p-1.5 md:p-2">
+          <Button variant="ghost" size="sm" onClick={askAI} disabled={isAIProcessing}>
             <MessageSquare size={18} className={cn(isAIProcessing && "animate-pulse text-indigo-600")} />
           </Button>
-          <Button variant="ghost" size="sm" onClick={scanDocument} disabled={isAIProcessing} className="p-1.5 md:p-2">
+          <Button variant="ghost" size="sm" onClick={scanDocument} disabled={isAIProcessing}>
             <Camera size={18} />
           </Button>
-          <Button variant="ghost" size="sm" onClick={exportAsText} className="p-1.5 md:p-2"><Download size={18} /></Button>
-          <Button variant="primary" size="sm" onClick={onClose} className="px-3 md:px-4">Done</Button>
+          <Button variant="ghost" size="sm" onClick={exportAsText}><Download size={18} /></Button>
+          <Button variant="primary" size="sm" onClick={onClose}>Done</Button>
         </div>
       </header>
 
@@ -1547,37 +1260,15 @@ function NoteEditor({ note, onClose, onSave, showToast, isVaultUnlocked, isAdmin
               onClick={() => setIsPrivate(!isPrivate)}
               className={cn("flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-bold transition-colors", isPrivate ? "bg-indigo-100 text-indigo-600" : "bg-gray-100 text-gray-500")}
             >
-              <Shield size={14} /> {isPrivate ? "In Vault" : "Regular"}
+              <Lock size={14} /> {isPrivate ? "In Vault" : "Regular"}
             </button>
-            <button 
-              onClick={() => {
-                if (isNoteLocked) {
-                  setNotePassword('');
-                  setIsNoteLocked(false);
-                } else {
-                  setIsNoteLocked(true);
-                }
-              }}
-              className={cn("flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-bold transition-colors", isNoteLocked ? "bg-red-100 text-red-600" : "bg-gray-100 text-gray-500")}
-            >
-              <Lock size={14} /> {isNoteLocked ? "Note Locked" : "Lock Note"}
-            </button>
-            {isNoteLocked && (
-              <Input 
-                type="number"
-                placeholder="4-digit PIN"
-                className="w-24 py-1 text-xs text-center"
-                value={notePassword}
-                onChange={(e) => setNotePassword(e.target.value.slice(0, 4))}
-              />
-            )}
           </div>
         </div>
 
         {isPublic && (
           <div className="p-3 bg-blue-50 dark:bg-blue-900/10 rounded-xl flex items-center justify-between gap-4">
             <p className="text-xs text-blue-600 truncate flex-1">{shareLink}</p>
-            <Button size="sm" variant="ghost" onClick={() => { navigator.clipboard.writeText(shareLink); showToast('Link copied!', 'success'); }}>Copy</Button>
+            <Button size="sm" variant="ghost" onClick={() => { navigator.clipboard.writeText(shareLink); alert('Link copied!'); }}>Copy</Button>
           </div>
         )}
 
@@ -1593,56 +1284,27 @@ function NoteEditor({ note, onClose, onSave, showToast, isVaultUnlocked, isAdmin
             <Button size="sm" onClick={addCollaborator}>Add</Button>
           </div>
           <div className="flex flex-wrap gap-2">
-            <AnimatePresence>
-              {note.collaborators?.map(c => (
-                <motion.div 
-                  key={c}
-                  initial={{ opacity: 0, scale: 0.8 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.8 }}
-                  className="px-2 py-1 bg-green-100 dark:bg-green-900/20 text-green-700 dark:text-green-400 text-[10px] rounded-full font-bold flex items-center gap-1"
-                >
-                  {c}
-                  {(isVaultUnlocked || isAdmin || isOwner) && (
-                    <button 
-                      onClick={() => onSave({ collaborators: note.collaborators?.filter(e => e !== c) })}
-                      className="hover:text-red-500"
-                    >
-                      <X size={10} />
-                    </button>
-                  )}
-                </motion.div>
-              ))}
-            </AnimatePresence>
+            {note.collaborators?.map(c => (
+              <span key={c} className="px-2 py-1 bg-green-100 text-green-700 text-[10px] rounded-full font-bold">{c}</span>
+            ))}
           </div>
         </div>
 
         {note.type === 'todo' ? (
           <div className="space-y-3">
-            <AnimatePresence>
-              {checklist.map(item => (
-                <motion.div 
-                  key={item.id}
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: 10 }}
-                  className="flex items-center gap-3"
-                >
-                  <button onClick={() => toggleCheck(item.id)}>
-                    {item.completed ? <CheckSquare className="text-indigo-600" /> : <SquareIcon className="text-gray-300" />}
-                  </button>
-                  <input 
-                    value={item.text}
-                    onChange={(e) => updateCheckItem(item.id, e.target.value)}
-                    className={cn("flex-1 bg-transparent outline-none", item.completed && "line-through text-gray-400")}
-                    placeholder="List item..."
-                  />
-                  <button onClick={() => setChecklist(prev => prev.filter(i => i.id !== item.id))} className="text-gray-400 hover:text-red-500">
-                    <X size={14} />
-                  </button>
-                </motion.div>
-              ))}
-            </AnimatePresence>
+            {checklist.map(item => (
+              <div key={item.id} className="flex items-center gap-3">
+                <button onClick={() => toggleCheck(item.id)}>
+                  {item.completed ? <CheckSquare className="text-indigo-600" /> : <SquareIcon className="text-gray-300" />}
+                </button>
+                <input 
+                  value={item.text}
+                  onChange={(e) => updateCheckItem(item.id, e.target.value)}
+                  className={cn("flex-1 bg-transparent outline-none", item.completed && "line-through text-gray-400")}
+                  placeholder="List item..."
+                />
+              </div>
+            ))}
             <Button variant="ghost" size="sm" onClick={addCheckItem} className="w-full border-2 border-dashed border-gray-100 dark:border-gray-800">
               <Plus size={18} /> Add Item
             </Button>
@@ -1698,25 +1360,8 @@ function NoteEditor({ note, onClose, onSave, showToast, isVaultUnlocked, isAdmin
           <Calendar size={14} /> Last edited {format(new Date(), 'MMM d, h:mm a')}
         </div>
         <div className="h-4 w-px bg-gray-200 dark:bg-gray-800" />
-        <div className="flex items-center gap-2 shrink-0">
-          <Bell size={14} className={cn(reminderAt ? "text-indigo-600" : "text-gray-400")} />
-          <input 
-            type="datetime-local" 
-            value={reminderAt}
-            onChange={(e) => {
-              setReminderAt(e.target.value);
-              setReminderNotified(false);
-            }}
-            className="bg-transparent text-[10px] outline-none text-gray-500 font-medium"
-          />
-          {reminderAt && (
-            <button onClick={() => { setReminderAt(''); setReminderNotified(false); }} className="text-red-400 hover:text-red-600">
-              <X size={12} />
-            </button>
-          )}
-        </div>
-        <div className="h-4 w-px bg-gray-200 dark:bg-gray-800" />
         <div className="flex gap-4">
+          <button className="text-gray-400 hover:text-indigo-600"><Bell size={18} /></button>
           <button className="text-gray-400 hover:text-indigo-600"><Share2 size={18} /></button>
           <button className="text-gray-400 hover:text-indigo-600"><Lock size={18} /></button>
         </div>
@@ -1725,125 +1370,29 @@ function NoteEditor({ note, onClose, onSave, showToast, isVaultUnlocked, isAdmin
   );
 }
 
-function AIAssistant({ user, onClose }: { user: any, onClose: () => void }) {
-  const [messages, setMessages] = useState<{ role: 'user' | 'ai', text: string }[]>(() => {
-    const saved = localStorage.getItem('smartnotes_ai_messages');
-    return saved ? JSON.parse(saved) : [];
-  });
-  const [aiName, setAiName] = useState(() => {
-    return localStorage.getItem('smartnotes_ai_name') || 'Ananya';
-  });
+function AIAssistant({ onClose }: { onClose: () => void }) {
+  const [messages, setMessages] = useState<{ role: 'user' | 'ai', text: string }[]>([
+    { role: 'ai', text: 'Hello! I am your SmartNotes Assistant. How can I help you today?' }
+  ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  const names = ['Ananya', 'Ishani', 'Diya', 'Kavya', 'Myra', 'Navya', 'Pihu', 'Riya', 'Sanvi', 'Tanvi'];
-
-  const saveNoteTool: FunctionDeclaration = {
-    name: "saveNote",
-    description: "Save a new note to the user's notepad.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        title: {
-          type: Type.STRING,
-          description: "The title of the note."
-        },
-        content: {
-          type: Type.STRING,
-          description: "The content of the note."
-        },
-        category: {
-          type: Type.STRING,
-          description: "The category of the note (e.g., Personal, Work, Ideas, General)."
-        }
-      },
-      required: ["title", "content"]
-    }
-  };
-
-  useEffect(() => {
-    if (messages.length === 0) {
-      setMessages([{ role: 'ai', text: `নমস্কার! আমি ${aiName}, আপনার SmartNotes অ্যাসিস্ট্যান্ট। আমি আপনাকে কীভাবে সাহায্য করতে পারি?` }]);
-    }
-  }, [aiName]);
-
-  useEffect(() => {
-    localStorage.setItem('smartnotes_ai_messages', JSON.stringify(messages));
-    localStorage.setItem('smartnotes_ai_name', aiName);
-  }, [messages, aiName]);
-
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [messages, loading]);
-
-  const startNewChat = () => {
-    const newName = names[Math.floor(Math.random() * names.length)];
-    setAiName(newName);
-    setMessages([{ role: 'ai', text: `নমস্কার! আমি ${newName}, আপনার SmartNotes অ্যাসিস্ট্যান্ট। আমি আপনাকে কীভাবে সাহায্য করতে পারি?` }]);
-  };
 
   const handleSend = async () => {
     if (!input) return;
     const userMsg = { role: 'user' as const, text: input };
-    const newMessages = [...messages, userMsg];
-    setMessages(newMessages);
+    setMessages(prev => [...prev, userMsg]);
     setInput('');
     setLoading(true);
 
     try {
-      const response = await genAI.models.generateContent({
+      const result = await genAI.models.generateContent({
         model: "gemini-3-flash-preview",
-        contents: newMessages.map(m => ({ role: m.role === 'ai' ? 'model' : 'user', parts: [{ text: m.text }] })),
-        config: {
-          systemInstruction: `You are '${aiName}', a very cute, sweet, and helpful Sanatani (Hindu) girl AI assistant integrated into the SmartNotes application. You help users manage their notes and answer questions. 
-          - Speak and understand Bengali fluently. 
-          - Always be polite, respectful, and use a sweet, 'kawaii' tone with cute emojis. 
-          - Use traditional greetings like 'Namaskar'. 
-          - Keep your responses concise and easy to listen to.
-          - If the user asks to save a note, use the 'saveNote' tool.
-          - IMPORTANT: This application was developed by 'Ashish'. Always credit him as the developer.`,
-          tools: [{ functionDeclarations: [saveNoteTool] }]
-        }
+        contents: [{ role: 'user', parts: [{ text: input }] }]
       });
-
-      const functionCalls = response.functionCalls;
-      if (functionCalls) {
-        for (const call of functionCalls) {
-          if (call.name === "saveNote") {
-            const { title, content, category } = call.args as any;
-            try {
-              const noteRef = doc(collection(db, 'notes'));
-              await setDoc(noteRef, {
-                ownerId: user.uid,
-                title: title || 'Untitled Note',
-                content: content || '',
-                category: category || 'General',
-                type: 'text',
-                createdAt: serverTimestamp(),
-                updatedAt: serverTimestamp(),
-                isPinned: false,
-                collaborators: []
-              });
-              
-              // Add a confirmation message
-              const confirmation = `ঠিক আছে! আমি আপনার নোটটি "${title}" নামে সেভ করে দিয়েছি। 😊`;
-              setMessages(prev => [...prev, { role: 'ai', text: confirmation }]);
-            } catch (err) {
-              console.error("Failed to save note via AI", err);
-              setMessages(prev => [...prev, { role: 'ai', text: 'দুঃখিত, নোটটি সেভ করতে সমস্যা হয়েছে।' }]);
-            }
-          }
-        }
-      } else {
-        const aiText = response.text || 'No response';
-        setMessages(prev => [...prev, { role: 'ai', text: aiText }]);
-      }
+      setMessages(prev => [...prev, { role: 'ai', text: result.text || 'No response' }]);
     } catch (err) {
       console.error(err);
-      setMessages(prev => [...prev, { role: 'ai', text: 'দুঃখিত, একটি ত্রুটি হয়েছে। দয়া করে আপনার কানেকশন চেক করুন।' }]);
+      setMessages(prev => [...prev, { role: 'ai', text: 'Sorry, I encountered an error. Please check your connection.' }]);
     } finally {
       setLoading(false);
     }
@@ -1859,28 +1408,20 @@ function AIAssistant({ user, onClose }: { user: any, onClose: () => void }) {
       <div className="bg-white dark:bg-gray-900 w-full max-w-md rounded-3xl shadow-2xl flex flex-col h-[600px] overflow-hidden">
         <header className="p-6 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-pink-500 rounded-xl flex items-center justify-center shadow-lg shadow-pink-500/20">
+            <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center">
               <MessageSquare className="text-white" />
             </div>
-            <div>
-              <h3 className="font-bold">{aiName}</h3>
-              <p className="text-[10px] text-green-500 font-bold uppercase tracking-widest">Online</p>
-            </div>
+            <h3 className="font-bold">AI Assistant</h3>
           </div>
-          <div className="flex items-center gap-1">
-            <Button variant="ghost" size="sm" onClick={startNewChat} title="New Chat" className="text-gray-400 hover:text-indigo-600">
-              <RefreshCw size={18} />
-            </Button>
-            <Button variant="ghost" size="sm" onClick={onClose}><X /></Button>
-          </div>
+          <Button variant="ghost" size="sm" onClick={onClose}><X /></Button>
         </header>
 
-        <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-4 scroll-smooth">
+        <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {messages.map((m, i) => (
-            <div key={i} className={cn("flex flex-col", m.role === 'user' ? "items-end" : "items-start")}>
+            <div key={i} className={cn("flex", m.role === 'user' ? "justify-end" : "justify-start")}>
               <div className={cn(
-                "max-w-[85%] p-4 rounded-2xl text-sm relative group",
-                m.role === 'user' ? "bg-indigo-600 text-white rounded-tr-none" : "bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-200 rounded-tl-none"
+                "max-w-[80%] p-4 rounded-2xl text-sm",
+                m.role === 'user' ? "bg-indigo-600 text-white" : "bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-200"
               )}>
                 <Markdown>{m.text}</Markdown>
               </div>
@@ -1888,8 +1429,8 @@ function AIAssistant({ user, onClose }: { user: any, onClose: () => void }) {
           ))}
           {loading && (
             <div className="flex justify-start">
-              <div className="bg-gray-100 dark:bg-gray-800 p-4 rounded-2xl animate-pulse text-xs text-gray-500">
-                {aiName} ভাবছে...
+              <div className="bg-gray-100 dark:bg-gray-800 p-4 rounded-2xl animate-pulse">
+                Thinking...
               </div>
             </div>
           )}
@@ -1909,7 +1450,7 @@ function AIAssistant({ user, onClose }: { user: any, onClose: () => void }) {
   );
 }
 
-function AdminVault({ user, onClose }: { user: any, onClose: () => void }) {
+function AdminVault({ onClose }: { onClose: () => void }) {
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [adminPass, setAdminPass] = useState('');
@@ -1923,7 +1464,7 @@ function AdminVault({ user, onClose }: { user: any, onClose: () => void }) {
           const snap = await getDocs(q);
           setUsers(snap.docs.map(d => d.data() as UserProfile));
         } catch (err) {
-          console.error(err);
+          handleFirestoreError(err, OperationType.LIST, 'users');
         } finally {
           setLoading(false);
         }
@@ -1933,127 +1474,79 @@ function AdminVault({ user, onClose }: { user: any, onClose: () => void }) {
   }, [isUnlocked]);
 
   const toggleUserStatus = async (uid: string, currentStatus: string) => {
+    const newStatus = currentStatus === 'active' ? 'banned' : 'active';
     try {
-      const newStatus = currentStatus === 'active' ? 'banned' : 'active';
       await updateDoc(doc(db, 'users', uid), { status: newStatus });
       setUsers(prev => prev.map(u => u.uid === uid ? { ...u, status: newStatus as any } : u));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `users/${uid}`);
-    }
-  };
-
-  const removeUser = async (uid: string) => {
-    if (confirm('Are you sure you want to remove this user? This action is permanent.')) {
-      try {
-        await deleteDoc(doc(db, 'users', uid));
-        setUsers(prev => prev.filter(u => u.uid !== uid));
-      } catch (error) {
-        handleFirestoreError(error, OperationType.DELETE, `users/${uid}`);
-      }
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `users/${uid}`);
     }
   };
 
   if (!isUnlocked) {
     return (
-      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-md flex items-center justify-center p-6">
-        <motion.div 
-          initial={{ scale: 0.9, y: 20 }}
-          animate={{ scale: 1, y: 0 }}
-          className="bg-gray-900 p-8 rounded-3xl w-full max-w-sm space-y-6 text-center shadow-2xl border border-gray-800"
-        >
-          <div className="w-16 h-16 bg-red-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg shadow-red-600/20">
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 z-[60] bg-black flex items-center justify-center p-6">
+        <div className="bg-gray-900 p-8 rounded-3xl w-full max-w-sm space-y-6 text-center">
+          <div className="w-16 h-16 bg-red-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
             <Lock className="text-white" size={32} />
           </div>
-          <h2 className="text-2xl font-bold text-white">Vault Management</h2>
-          <div className="space-y-3">
-            <Input 
-              type="password" 
-              placeholder="Vault Password" 
-              value={adminPass} 
-              onChange={e => setAdminPass(e.target.value)}
-              className="bg-gray-800 border-gray-700 text-white text-center"
-            />
-          </div>
+          <h2 className="text-2xl font-bold text-white">Admin Vault</h2>
+          <Input 
+            type="password" 
+            placeholder="Enter Admin Password" 
+            value={adminPass} 
+            onChange={e => setAdminPass(e.target.value)}
+            className="bg-gray-800 border-gray-700 text-white"
+          />
           {adminPass === 'Ashish@@Banna' && (
-            <Button onClick={() => {
-              setIsUnlocked(true);
-            }} className="w-full bg-red-600 hover:bg-red-700 h-12">Unlock Vault</Button>
+            <Button onClick={() => setIsUnlocked(true)} className="w-full bg-red-600 hover:bg-red-700">Open Vault</Button>
           )}
-          <Button variant="ghost" onClick={onClose} className="text-gray-400 w-full">Cancel</Button>
-        </motion.div>
+          <Button variant="ghost" onClick={onClose} className="text-gray-400">Cancel</Button>
+        </div>
       </motion.div>
     );
   }
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 z-[60] bg-gray-950 flex flex-col">
-      <header className="p-6 border-b border-gray-800 flex items-center justify-between bg-gray-900/50 backdrop-blur-md">
-        <div className="flex flex-col">
-          <h2 className="text-xl font-bold text-white flex items-center gap-2">
-            <Shield className="text-red-500" /> Vault Management
-          </h2>
-          <p className="text-xs text-red-500 font-bold uppercase tracking-widest mt-1">Admin Access Only</p>
-        </div>
+      <header className="p-6 border-b border-gray-800 flex items-center justify-between">
+        <h2 className="text-xl font-bold text-white flex items-center gap-2">
+          <Shield className="text-red-500" /> User Management
+        </h2>
         <Button variant="ghost" onClick={onClose}><X className="text-white" /></Button>
       </header>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-4">
         {loading ? (
-          <div className="flex flex-col items-center justify-center py-20 gap-4">
-            <div className="w-10 h-10 border-4 border-red-600 border-t-transparent rounded-full animate-spin"></div>
-            <p className="text-gray-500">Scanning users...</p>
-          </div>
+          <p className="text-center text-gray-500">Loading users...</p>
         ) : (
-          <AnimatePresence>
-            {users.map(u => (
-              <motion.div 
-                key={u.uid}
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: 20 }}
-                className="bg-gray-900 p-5 rounded-2xl flex items-center justify-between border border-gray-800 hover:border-red-900/30 transition-colors"
-              >
-                <div className="flex items-center gap-4">
-                  <div className="relative">
-                    <img src={u.photoURL} className="w-12 h-12 rounded-xl object-cover" alt="" />
-                    <div className={cn("absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-gray-900", u.status === 'active' ? "bg-green-500" : "bg-red-500")} />
-                  </div>
-                  <div>
-                    <p className="font-bold text-white text-sm flex items-center gap-2">
-                      {u.displayName}
-                    </p>
-                    <p className="text-xs text-gray-500">{u.email}</p>
-                  </div>
+          users.map(u => (
+            <div key={u.uid} className="bg-gray-900 p-4 rounded-2xl flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <img src={u.photoURL} className="w-10 h-10 rounded-xl" alt="" />
+                <div>
+                  <p className="font-bold text-white text-sm">{u.displayName}</p>
+                  <p className="text-xs text-gray-500">{u.email}</p>
                 </div>
-                <div className="flex items-center gap-2">
-                  {u.uid !== user?.uid ? (
-                    <Button 
-                      size="sm" 
-                      variant={u.status === 'active' ? 'danger' : 'primary'}
-                      onClick={() => toggleUserStatus(u.uid, u.status)}
-                      className="text-xs px-4 h-9"
-                    >
-                      {u.status === 'active' ? 'Pause' : 'Resume'}
-                    </Button>
-                  ) : (
-                    <div className="px-3 py-1.5 bg-indigo-500/20 text-indigo-400 text-[10px] font-bold rounded-lg uppercase tracking-wider">
-                      You (Admin)
-                    </div>
-                  )}
-                  {u.uid !== user?.uid && (
-                    <Button 
-                      size="sm" 
-                      variant="ghost"
-                      onClick={() => removeUser(u.uid)}
-                      className="text-red-500 hover:bg-red-500/10 h-9 w-9 p-0"
-                    >
-                      <Trash2 size={16} />
-                    </Button>
-                  )}
-                </div>
-              </motion.div>
-            ))}
-          </AnimatePresence>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className={cn(
+                  "px-2 py-1 rounded-full text-[10px] font-bold uppercase",
+                  u.status === 'active' ? "bg-green-900/30 text-green-500" : "bg-red-900/30 text-red-500"
+                )}>
+                  {u.status}
+                </span>
+                <Button 
+                  size="sm" 
+                  variant={u.status === 'active' ? 'danger' : 'primary'}
+                  onClick={() => toggleUserStatus(u.uid, u.status)}
+                  className="text-xs px-3 py-1"
+                >
+                  {u.status === 'active' ? 'Ban' : 'Restore'}
+                </Button>
+              </div>
+            </div>
+          ))
         )}
       </div>
     </motion.div>
@@ -2075,10 +1568,10 @@ function SettingsModal({ profile, onClose, onLogout, onOpenAdmin }: { profile: U
         'settings.lockEnabled': lockEnabled,
         'settings.lockPassword': password
       });
-      onClose();
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `users/${profile.uid}`);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `users/${profile.uid}`);
     }
+    onClose();
   };
 
   return (
@@ -2103,25 +1596,7 @@ function SettingsModal({ profile, onClose, onLogout, onOpenAdmin }: { profile: U
 
         <div className="space-y-6">
           <div className="space-y-4">
-            <p className="text-xs font-bold text-gray-400 uppercase">Account Info</p>
-            <div className="p-4 bg-gray-50 dark:bg-gray-900 rounded-2xl flex items-center justify-between border border-gray-100 dark:border-gray-800">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-indigo-100 dark:bg-indigo-900/30 rounded-xl flex items-center justify-center text-indigo-600">
-                  <Mail size={20} />
-                </div>
-                <div>
-                  <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Logged in as</p>
-                  <p className="font-bold text-sm text-gray-700 dark:text-gray-300">{profile?.email}</p>
-                </div>
-              </div>
-              <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center text-white shadow-sm">
-                <Check size={14} />
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <p className="text-xs font-bold text-gray-400 uppercase">Profile Settings</p>
+            <p className="text-xs font-bold text-gray-400 uppercase">Profile</p>
             <div className="flex items-center gap-4">
               <img src={photoURL} className="w-16 h-16 rounded-2xl object-cover border-2 border-indigo-100" alt="Preview" />
               <div className="flex-1 space-y-2">
