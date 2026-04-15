@@ -12,6 +12,12 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      # এই অংশটি নতুন যোগ করা হয়েছে Node ভার্সন ঠিক করার জন্য
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
@@ -35,7 +41,7 @@ jobs:
           cat <<EOF > capacitor.config.json
           {
             "appId": "com.ec.aoo",
-            "appName": "smartnote",
+            "appName": "testapp",
             "webDir": "dist",
             "server": {
               "androidScheme": "https",
