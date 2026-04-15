@@ -17,11 +17,16 @@ export interface Note {
   isPinned: boolean;
   isPrivate: boolean;
   isPublic: boolean;
+  isArchived?: boolean;
+  isDeleted?: boolean;
+  color?: string;
   type: NoteType;
   images?: string[];
   checklist?: ChecklistItem[];
   voiceUrl?: string;
   reminderAt?: string;
+  reminderNotified?: boolean;
+  notePassword?: string;
   createdAt: any;
   updatedAt: any;
 }
@@ -37,5 +42,6 @@ export interface UserProfile {
     lockPassword?: string;
   };
   status: 'active' | 'banned';
+  role: 'admin' | 'user';
   createdAt: any;
 }
